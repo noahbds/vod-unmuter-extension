@@ -46,7 +46,7 @@
     const FALLBACK_DIRS = ['chunked', '1080p60', '1080p30', '720p60', '720p30', '480p30', '360p30', '160p30'];
 
     const realFetch = scope.fetch;
-    let settings = { enabled: true, saveAudio: true, saveMode: 'whole', keepDays: 60 };
+    let settings = { enabled: true, saveAudio: true, saveMode: 'whole', keepDays: 60, saveQuality: 'high', maxStorageMB: 1000 };
 
     let channel = null;
     try { channel = new BroadcastChannel(CHANNEL); } catch (e) { /* unsupported */ }
@@ -98,7 +98,7 @@
             ((buf[p + 10] << 22) | ((buf[p + 11] >> 1) << 15) | (buf[p + 12] << 7) | (buf[p + 13] >> 1));
         }
       }
-      return audioPid >= 0 ? { audioPid, audioType, pts } : null;
+      return audioPid >= 0 ? { audioPid, audioType, pts, pmtPid } : null;
     }
 
     // The audio packets of a segment: what gets saved, and what gets spliced.
@@ -131,10 +131,15 @@
 
       const keep = [];
       let firstCC = -1;
+      let start = 0; // audio may only come after the stream table (PAT/PMT)
       for (let o = 0; o + PKT <= target.length; o += PKT) {
-        if ((((target[o + 1] & 0x1f) << 8) | target[o + 2]) === t.audioPid) {
+        const pid = ((target[o + 1] & 0x1f) << 8) | target[o + 2];
+        if (pid === t.audioPid) {
           if (firstCC < 0) firstCC = target[o + 3] & 0x0f;
-        } else keep.push(o);
+        } else {
+          keep.push(o);
+          if (pid === t.pmtPid && !start) start = keep.length;
+        }
       }
       const ccShift = firstCC < 0 ? 0 : (firstCC - (src[3] & 0x0f) + 16) % 16;
 
@@ -148,9 +153,11 @@
         out[w + 3] = (out[w + 3] & 0xf0) | (((out[w + 3] & 0x0f) + ccShift) % 16);
         w += PKT;
       };
-      // Spread the audio evenly between the target's other packets.
+      // Spread the audio evenly between the target's other packets, starting
+      // right after the stream table so players know it's audio.
+      const span = Math.max(1, keep.length - start);
       for (let i = 0; i < keep.length; i++) {
-        while (a < count && a / count <= i / keep.length) putAudio();
+        while (i >= start && a < count && a / count <= (i - start) / span) putAudio();
         out.set(target.subarray(keep[i], keep[i] + PKT), w);
         w += PKT;
       }
@@ -212,7 +219,107 @@
       } catch (e) { return new Set(); }
     }
 
-    async function loadSaved(vod, num) {
+    // ---- compression ------------------------------------------------------
+    // A saved segment is one of:
+    //   { fmt: 'deflate', type, pts, data, packed }  audio packets, lossless
+    //   { fmt: 'aac', type, pts, kbps, data }        sound re-encoded to AAC
+    //                                                (ADTS frames), smaller
+    //   { type, pts, packets }                       v3.0: uncompressed packets
+    const recBytes = (rec) => (rec.data || rec.packets).byteLength;
+    const concat = (parts) => {
+      const out = new Uint8Array(parts.reduce((n, b) => n + b.length, 0));
+      let w = 0;
+      for (const b of parts) { out.set(b, w); w += b.length; }
+      return out;
+    };
+
+    async function pipeBytes(bytes, stream) {
+      return new Uint8Array(await new Response(new Blob([bytes]).stream().pipeThrough(stream)).arrayBuffer());
+    }
+    async function deflate(bytes) {
+      try { return { data: await pipeBytes(bytes, new CompressionStream('deflate-raw')), packed: true }; }
+      catch (e) { return { data: bytes, packed: false }; }
+    }
+    const inflate = (bytes) => pipeBytes(bytes, new DecompressionStream('deflate-raw'));
+
+    // AAC frames (ADTS) carried by a segment's audio packets.
+    function packetsToAdts(packets) {
+      const parts = [];
+      let started = false;
+      for (let o = 0; o + 188 <= packets.length; o += 188) {
+        const afc = (packets[o + 3] >> 4) & 3;
+        if (!(afc & 1)) continue;
+        let p = o + 4 + ((afc & 2) ? 1 + packets[o + 4] : 0);
+        if (packets[o + 1] & 0x40) { p += 9 + packets[p + 8]; started = true; } // skip the PES header
+        if (started && p < o + 188) parts.push(packets.subarray(p, o + 188));
+      }
+      return concat(parts);
+    }
+    function splitAdts(es) {
+      const frames = [];
+      for (let i = 0; i + 7 <= es.length;) {
+        if (es[i] !== 0xff || (es[i + 1] & 0xf6) !== 0xf0) { i++; continue; }
+        const len = ((es[i + 3] & 3) << 11) | (es[i + 4] << 3) | (es[i + 5] >> 5);
+        if (len < 7 || i + len > es.length) break;
+        frames.push(es.subarray(i, i + len));
+        i += len;
+      }
+      return frames;
+    }
+    const ADTS_RATES = [96000, 88200, 64000, 48000, 44100, 32000, 24000, 22050, 16000, 12000, 11025, 8000, 7350];
+    const adtsInfo = (f) => ({ sampleRate: ADTS_RATES[(f[2] >> 2) & 0xf] || 48000, channels: (((f[2] & 1) << 2) | (f[3] >> 6)) || 2 });
+
+    // AAC frames -> MPEG-TS audio packets (PID 0x100; spliceAudio renumbers it).
+    function muxAdts(frames, pts, sampleRate) {
+      const PER_PES = 4;
+      const ticks = (1024 * 90000) / sampleRate; // 90 kHz clock per AAC frame
+      const packets = [];
+      let cc = 0;
+      for (let i = 0; i < frames.length; i += PER_PES) {
+        const payload = concat(frames.slice(i, i + PER_PES));
+        const t = Math.round(pts + i * ticks) % 8589934592;
+        const hi = Math.floor(t / 1073741824) & 7, lo = t % 1073741824;
+        const len = 8 + payload.length;
+        const pes = concat([new Uint8Array([0, 0, 1, 0xc0, len > 0xffff ? 0 : len >> 8, len > 0xffff ? 0 : len & 0xff,
+          0x80, 0x80, 5, 0x21 | (hi << 1), (lo >> 22) & 0xff, (((lo >> 15) & 0x7f) << 1) | 1, (lo >> 7) & 0xff, ((lo & 0x7f) << 1) | 1]), payload]);
+        for (let o = 0; o < pes.length;) {
+          const pkt = new Uint8Array(188);
+          const left = pes.length - o;
+          pkt[0] = 0x47;
+          pkt[1] = (o === 0 ? 0x40 : 0) | 0x01;
+          pkt[2] = 0x00;
+          if (left >= 184) {
+            pkt[3] = 0x10 | cc;
+            pkt.set(pes.subarray(o, o + 184), 4);
+            o += 184;
+          } else {
+            pkt[3] = 0x30 | cc; // adaptation field = stuffing
+            const af = 183 - left;
+            pkt[4] = af;
+            if (af > 0) { pkt[5] = 0; pkt.fill(0xff, 6, 5 + af); }
+            pkt.set(pes.subarray(o), 5 + af);
+            o = pes.length;
+          }
+          cc = (cc + 1) & 0x0f;
+          packets.push(pkt);
+        }
+      }
+      return concat(packets);
+    }
+
+    // What spliceAudio needs, from a saved record.
+    async function recordToAudio(rec) {
+      if (!rec) return null;
+      if (!rec.fmt) return { type: rec.type, pts: rec.pts, packets: rec.packets };
+      if (rec.fmt === 'deflate') return { type: rec.type, pts: rec.pts, packets: rec.packed ? await inflate(rec.data) : rec.data };
+      if (rec.fmt === 'aac') {
+        const frames = splitAdts(rec.data);
+        return frames.length ? { type: 0x0f, pts: rec.pts, packets: muxAdts(frames, rec.pts, adtsInfo(frames[0]).sampleRate) } : null;
+      }
+      return null;
+    }
+
+    async function loadRecord(vod, num) {
       try {
         return await idb('audio', 'readonly', (audio, out) => {
           const r = audio.get(vod + '|' + num);
@@ -220,23 +327,27 @@
         });
       } catch (e) { return null; }
     }
+    const loadSaved = async (vod, num) => recordToAudio(await loadRecord(vod, num));
 
-    async function storeAudio(vod, num, audio) {
-      const bytes = audio.packets.byteLength;
+    // Adds a segment (or replaces it, for compression) and keeps the VOD's
+    // totals up to date.
+    async function putRecord(vod, num, rec, replace) {
+      const bytes = recBytes(rec);
       try {
         return await idb(['audio', 'vods'], 'readwrite', (store, vods, out) => {
           const key = vod + '|' + num;
-          const exists = store.getKey(key);
-          exists.onsuccess = () => {
-            if (exists.result !== undefined) return;
-            store.put({ type: audio.type, pts: audio.pts, packets: audio.packets }, key);
+          const old = store.get(key);
+          old.onsuccess = () => {
+            if (old.result !== undefined && !replace) return;
+            const before = old.result ? recBytes(old.result) : 0;
+            store.put(rec, key);
             const v = vods.get(vod);
             v.onsuccess = () => {
-              const rec = v.result || Object.assign({ vod, savedAt: Date.now(), segments: 0, bytes: 0 }, vodInfo(vod));
-              rec.segments++;
-              rec.bytes += bytes;
-              vods.put(rec);
-              out.value = rec;
+              const info = v.result || Object.assign({ vod, savedAt: Date.now(), segments: 0, bytes: 0 }, vodInfo(vod));
+              if (!old.result) info.segments++;
+              info.bytes += bytes - before;
+              vods.put(info);
+              out.value = info;
             };
           };
         });
@@ -244,6 +355,117 @@
         console.warn(TAG, 'could not save audio (storage full?)', e);
         return null;
       }
+    }
+
+    // ---- re-encoding (saving step 2, "High" / "Small" quality) --------------
+    // Uses WebCodecs. Each segment is encoded with the end of the previous
+    // segment in front of it and then cut exactly at its own start: AAC
+    // encoders add ~44 ms of silence at the start of every encode, which
+    // would otherwise leave a gap every 10 seconds.
+    const KBPS = { high: 96, small: 64 };
+    const delays = new Map(); // "rate|channels|kbps" -> encoder delay in samples, or null
+    const codecsAvailable = () => typeof scope.AudioEncoder === 'function' && typeof scope.AudioDecoder === 'function';
+
+    async function decodeFrames(frames, info) {
+      const out = Array.from({ length: info.channels }, () => []);
+      let failed = null;
+      const dec = new scope.AudioDecoder({
+        output: (a) => {
+          for (let c = 0; c < info.channels; c++) {
+            const b = new Float32Array(a.numberOfFrames);
+            a.copyTo(b, { planeIndex: c, format: 'f32-planar' });
+            out[c].push(b);
+          }
+          a.close();
+        },
+        error: (e) => { failed = e; },
+      });
+      dec.configure({ codec: 'mp4a.40.2', sampleRate: info.sampleRate, numberOfChannels: info.channels });
+      frames.forEach((f, i) => dec.decode(new scope.EncodedAudioChunk({
+        type: 'key', timestamp: Math.round((i * 1024 * 1e6) / info.sampleRate), data: f,
+      })));
+      await dec.flush();
+      dec.close();
+      if (failed) throw failed;
+      return out.map((parts) => {
+        const ch = new Float32Array(parts.reduce((n, b) => n + b.length, 0));
+        let w = 0;
+        for (const b of parts) { ch.set(b, w); w += b.length; }
+        return ch;
+      });
+    }
+
+    async function encodePcm(chans, info, kbps) {
+      const frames = [];
+      let failed = null;
+      const enc = new scope.AudioEncoder({
+        output: (c) => { const b = new Uint8Array(c.byteLength); c.copyTo(b); frames.push(b); },
+        error: (e) => { failed = e; },
+      });
+      enc.configure({ codec: 'mp4a.40.2', sampleRate: info.sampleRate, numberOfChannels: info.channels, bitrate: kbps * 1000, aac: { format: 'adts' } });
+      const n = chans[0].length;
+      const planar = new Float32Array(n * info.channels);
+      chans.forEach((c, i) => planar.set(c, i * n));
+      enc.encode(new scope.AudioData({ format: 'f32-planar', sampleRate: info.sampleRate, numberOfFrames: n, numberOfChannels: info.channels, timestamp: 0, data: planar }));
+      await enc.flush();
+      enc.close();
+      if (failed) throw failed;
+      return frames;
+    }
+
+    // The encoder's start-up delay differs between systems (2112 samples on
+    // macOS): measure it once by encoding noise and finding where it lands.
+    async function encoderDelay(info, kbps) {
+      const key = info.sampleRate + '|' + info.channels + '|' + kbps;
+      if (delays.has(key)) return delays.get(key);
+      let delay = null;
+      try {
+        const cfg = { codec: 'mp4a.40.2', sampleRate: info.sampleRate, numberOfChannels: info.channels, bitrate: kbps * 1000, aac: { format: 'adts' } };
+        const dcfg = { codec: 'mp4a.40.2', sampleRate: info.sampleRate, numberOfChannels: info.channels };
+        if (codecsAvailable() && (await scope.AudioEncoder.isConfigSupported(cfg)).supported &&
+            (await scope.AudioDecoder.isConfigSupported(dcfg)).supported) {
+          let seed = 12345;
+          const noise = new Float32Array(info.sampleRate);
+          // Low-passed noise: never repeats (no false matches) and AAC encodes
+          // it faithfully enough to find the shift reliably.
+          let y = 0;
+          for (let i = 0; i < noise.length; i++) {
+            seed = (Math.imul(seed, 1103515245) + 12345) >>> 0;
+            y = 0.9 * y + 0.2 * (seed / 4294967296 - 0.5);
+            noise[i] = y;
+          }
+          const out = (await decodeFrames(await encodePcm(Array(info.channels).fill(noise), info, kbps), info))[0];
+          let best = -1, bestLag = 0;
+          const from = 8192, to = Math.min(from + 16384, noise.length - 8192);
+          for (let lag = 0; lag < 6144; lag++) { // real encoders: ~1000-2200 samples
+            let c = 0, a = 0, b = 0;
+            for (let i = from; i < to; i += 2) { const x = noise[i], y = out[i + lag] || 0; c += x * y; a += x * x; b += y * y; }
+            const r = c / Math.sqrt(a * b || 1);
+            if (r > best) { best = r; bestLag = lag; }
+          }
+          if (best > 0.8) delay = bestLag;
+        }
+      } catch (e) { delay = null; }
+      delays.set(key, delay);
+      if (delay === null) console.log(TAG, 'this browser cannot re-encode AAC: saved audio stays lossless');
+      return delay;
+    }
+
+    // prevTail: the decoded end of the previous segment (or null = silence).
+    async function reencode(prevTail, cur, info, kbps, delay, frameCount) {
+      const K = Math.ceil(delay / 1024) + 1;
+      const lead = 1024 * K - delay; // samples placed before the segment start
+      const n = cur[0].length;
+      const input = cur.map((ch, c) => {
+        const x = new Float32Array(lead + n);
+        const prev = prevTail && prevTail[c];
+        if (prev && prev.length) x.set(prev.subarray(Math.max(0, prev.length - lead)), lead - Math.min(lead, prev.length));
+        x.set(ch, lead);
+        return x;
+      });
+      const frames = await encodePcm(input, info, kbps);
+      const keep = frames.slice(K, K + frameCount); // output frame K starts exactly at the segment start
+      return keep.length >= frameCount - 2 ? concat(keep) : null;
     }
 
     async function deleteSavedVod(vod) {
@@ -447,6 +669,8 @@
             enabled: !!settings.saveAudio, mode: settings.saveMode,
             saved, savable: restored, active: job.saving,
             bytes: job.savedBytes, savedAt: job.savedAt, paused: job.noSave,
+            quality: settings.saveQuality, limitReached: !!job.limitReached, maxMB: Number(settings.maxStorageMB) || 0,
+            compressing: job.compressing ? { done: job.compressDone, total: job.compressTotal } : null,
           },
         });
       }
@@ -487,42 +711,92 @@
       const restored = sendResult(job);
       console.log(`${TAG} [${prettyQuality(job.dir)}] ${restored}/${job.segs.length} muted segments can be unmuted` +
         (restored < job.segs.length ? ' (the rest is deleted in every quality)' : ''));
-      if (isCurrent(job)) maybeSaveAll(job);
+      if (isCurrent(job)) { maybeSaveAll(job); scheduleCompress(job); }
     }
 
     // ------------------------------------------------------------ saving
-    function noteSaved(job, num, rec) {
-      if (!rec) return;
+    function noteSaved(job, info) {
+      if (!info) return;
       // Keep every quality of this VOD in sync.
       for (const j of jobs) {
         if (j.vodKey !== job.vodKey) continue;
-        j.saved.add(num);
-        j.savedBytes = rec.bytes;
-        j.savedAt = rec.savedAt;
+        j.savedBytes = info.bytes;
+        j.savedAt = info.savedAt;
       }
       if (job.finished) scheduleResult(job);
     }
 
+    // Storage limit: delete the oldest other saves first; if this VOD alone
+    // doesn't fit, stop saving it.
+    async function makeRoom(job, incoming) {
+      const maxMB = Number(settings.maxStorageMB) || 0;
+      if (!maxMB) return true;
+      const limit = maxMB * 1e6;
+      const all = await listSaved();
+      let total = all.reduce((n, v) => n + v.bytes, 0) + incoming;
+      if (total <= limit) return true;
+      for (const v of all.filter((x) => x.vod !== job.vodKey).sort((a, b) => a.savedAt - b.savedAt)) {
+        if (total <= limit) break;
+        await deleteSavedVod(v.vod);
+        total -= v.bytes;
+        console.log(TAG, `storage limit: deleted the oldest saved VOD (${v.channel || v.vod})`);
+      }
+      return total <= limit;
+    }
+
+    // Saves run one at a time, so the storage limit is checked against
+    // what's really on disk.
+    let saveQueue = Promise.resolve();
+    const serially = (task) => {
+      const run = saveQueue.then(task, task);
+      saveQueue = run.catch(() => {});
+      return run;
+    };
+
     async function saveFromBytes(seg, bytes) {
       const job = seg.job;
-      if (!settings.saveAudio || job.noSave || job.saved.has(seg.num)) return;
+      if (!settings.saveAudio || job.noSave || job.limitReached || job.saved.has(seg.num)) return;
       const audio = extractAudio(bytes);
-      if (audio) noteSaved(job, seg.num, await storeAudio(job.vodKey, seg.num, audio));
+      if (!audio) return;
+      const info = await serially(async () => {
+        if (job.limitReached || job.saved.has(seg.num)) return null;
+        const packed = await deflate(audio.packets);
+        if (!(await makeRoom(job, packed.data.byteLength))) {
+          job.limitReached = true;
+          scheduleResult(job);
+          return null;
+        }
+        return putRecord(job.vodKey, seg.num, { fmt: 'deflate', type: audio.type, pts: audio.pts, data: packed.data, packed: packed.packed }, false);
+      });
+      if (!info) return;
+      for (const j of jobs) if (j.vodKey === job.vodKey) j.saved.add(seg.num);
+      noteSaved(job, info);
+      if (settings.saveMode !== 'whole') scheduleCompress(job);
+    }
+
+    // Which quality to download for saving: the sound is the same from 480p
+    // up, and 160p/360p can have slightly worse sound, so take the smallest
+    // file that still has full-quality sound.
+    function saveDirs(job) {
+      const height = (d) => (d === 'chunked' ? 1e4 : parseInt(d, 10) || 0);
+      const dirs = allDirs(job).filter((d) => d !== 'audio_only');
+      const good = dirs.filter((d) => height(d) >= 480).sort((a, b) => height(a) - height(b));
+      const low = dirs.filter((d) => height(d) < 480).sort((a, b) => height(b) - height(a));
+      return ['audio_only', ...good, ...low];
     }
 
     // "Whole VOD" mode: save every muted part that can still be unmuted, not
-    // just the ones played. Downloads the smallest quality that has the
-    // original (the sound is the same in all of them).
+    // just the ones played.
     async function maybeSaveAll(job) {
       if (!settings.saveAudio || settings.saveMode !== 'whole' || job.noSave) return;
       if (!job.finished || job.saving || job.savedAll) return;
       const todo = job.segs.filter((s) => s.source && s.source !== 'saved' && !job.saved.has(s.num));
-      if (!todo.length) { job.savedAll = true; return; }
+      if (!todo.length) { job.savedAll = true; compressJob(job); return; }
       job.saving = true;
       sendResult(job);
-      const dirs = ['audio_only'].concat(allDirs(job).filter((d) => d !== 'audio_only').reverse());
+      const dirs = saveDirs(job);
       await Promise.all(todo.map((seg) => saveLimited(async () => {
-        if (!settings.saveAudio || job.noSave || job.saved.has(seg.num)) return;
+        if (!settings.saveAudio || job.noSave || job.limitReached || job.saved.has(seg.num)) return;
         for (const dir of dirs) {
           for (const sfx of SUFFIXES) {
             const url = urlFor(seg, dir + '/' + sfx);
@@ -538,8 +812,99 @@
         }
       })));
       job.saving = false;
-      job.savedAll = true;
+      job.savedAll = !job.limitReached;
       sendResult(job);
+      compressJob(job);
+    }
+
+    // ---- saving step 2: compress what was saved ------------------------------
+    function scheduleCompress(job) {
+      clearTimeout(job.compressTimer);
+      job.compressTimer = setTimeout(() => compressJob(job), 15000);
+    }
+
+    // The end of segment num-1, for a seamless join: from the saved copy if
+    // there is one, or from Twitch (segments before a muted part play
+    // normally, so they still exist), or silence.
+    async function leadInFrames(job, num, cache) {
+      if (cache.num === num - 1 && cache.frames) return cache.frames.slice(-8);
+      const muted = job.segs.find((s) => s.num === num - 1);
+      if (muted) {
+        if (!job.saved.has(num - 1)) return [];
+        const audio = await loadSaved(job.vodKey, num - 1);
+        return audio ? splitAdts(packetsToAdts(audio.packets)).slice(-8) : [];
+      }
+      for (const dir of saveDirs(job)) {
+        try {
+          const r = await realFetch.call(scope, job.vodBase + dir + '/' + (num - 1) + '.ts');
+          if (!r.ok) continue;
+          const audio = extractAudio(new Uint8Array(await r.arrayBuffer()));
+          if (audio) return splitAdts(packetsToAdts(audio.packets)).slice(-8);
+        } catch (e) { /* try the next quality */ }
+      }
+      return [];
+    }
+
+    async function compressJob(job) {
+      const kbps = KBPS[settings.saveQuality];
+      if (!settings.saveAudio || job.noSave || !job.saved.size) return;
+      if (job.compressing) { job.compressAgain = true; return; }
+      job.compressing = true;
+      job.compressAgain = false;
+      let freed = 0;
+      try {
+        const nums = [...job.saved].sort((a, b) => a - b);
+        job.compressTotal = nums.length;
+        job.compressDone = 0;
+        const cache = { num: null, frames: null };
+        for (const num of nums) {
+          if (!settings.saveAudio || job.noSave) break;
+          job.compressDone++;
+          if (job.compressDone % 10 === 0) scheduleResult(job);
+          const rec = await loadRecord(job.vodKey, num);
+          if (!rec) continue;
+          if (rec.fmt === 'aac') { cache.num = null; continue; } // already re-encoded once
+          const audio = await recordToAudio(rec);
+          if (!audio) continue;
+          let next = null;
+          if (kbps) {
+            const frames = splitAdts(packetsToAdts(audio.packets));
+            const info = frames.length && adtsInfo(frames[0]);
+            const delay = info ? await encoderDelay(info, kbps) : null;
+            if (delay !== null) {
+              try {
+                const lead = await leadInFrames(job, num, cache);
+                const pcm = await decodeFrames(lead.concat(frames), info);
+                const skip = lead.length * 1024;
+                const data = await reencode(lead.length ? pcm.map((c) => c.subarray(0, skip)) : null,
+                  pcm.map((c) => c.subarray(skip)), info, kbps, delay, frames.length);
+                if (data) next = { fmt: 'aac', type: 0x0f, pts: audio.pts, kbps, data };
+              } catch (e) { /* keep it lossless */ }
+              cache.num = num;
+              cache.frames = frames;
+            }
+          }
+          // Lossless fallback (or "Original" quality): only old uncompressed saves change.
+          if (!next && !rec.fmt) {
+            const packed = await deflate(rec.packets);
+            next = { fmt: 'deflate', type: rec.type, pts: rec.pts, data: packed.data, packed: packed.packed };
+          }
+          if (next && recBytes(next) < recBytes(rec)) {
+            freed += recBytes(rec) - recBytes(next);
+            noteSaved(job, await putRecord(job.vodKey, num, next, true));
+          }
+        }
+      } finally {
+        job.compressing = false;
+        scheduleResult(job);
+      }
+      if (job.compressAgain) { compressJob(job); return; }
+      // Compression may have made room to save the rest.
+      if (job.limitReached && freed > 0) {
+        job.limitReached = false;
+        job.savedAll = false;
+        maybeSaveAll(job);
+      }
     }
 
     // ------------------------------------------------------------ playlists
@@ -573,6 +938,7 @@
         dir: base.slice(vodBase.length, -1),
         base, vodBase, total: 0, segs: [], done: 0, finished: false,
         saved: new Set(), savedBytes: 0, savedAt: null, saving: false, savedAll: false, noSave: false,
+        limitReached: false, compressing: false, compressDone: 0, compressTotal: 0,
       };
 
       const lines = text.split('\n');
@@ -705,12 +1071,17 @@
         const m = ev.data;
         if (!m) return;
         if (m.type === 'settings' && m.settings) {
-          const wasSaving = settings.saveAudio;
+          const before = settings;
           settings = Object.assign({}, settings, m.settings);
           if (IS_PAGE) expireSaved(Number(settings.keepDays) || 0).catch(() => {});
           for (const job of jobs) {
-            if (settings.saveAudio && !wasSaving) job.savedAll = false;
-            if (job.finished && isCurrent(job)) { sendResult(job); maybeSaveAll(job); }
+            if (settings.saveAudio && !before.saveAudio) job.savedAll = false;
+            if (Number(settings.maxStorageMB) !== Number(before.maxStorageMB)) { job.limitReached = false; job.savedAll = false; }
+            if (job.finished && isCurrent(job)) {
+              sendResult(job);
+              maybeSaveAll(job);
+              if (settings.saveQuality !== before.saveQuality) compressJob(job);
+            }
           }
         } else if (m.type === 'deleteSaved' && m.vodKey) {
           // Every instance forgets it; the page instance deletes it from disk.
@@ -782,7 +1153,7 @@
       return handleOther(input, init, url);
     };
 
-    scope.__vodUnmuterDebug = { jobs, renditions, scanTs, extractAudio, spliceAudio, listSaved };
+    scope.__vodUnmuterDebug = { jobs, renditions, scanTs, extractAudio, spliceAudio, listSaved, loadRecord, recordToAudio, muxAdts, splitAdts, packetsToAdts, encoderDelay };
   }
 
   // 1) Hook the page itself (in case the player ever runs without a worker).

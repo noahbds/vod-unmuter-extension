@@ -7,7 +7,7 @@
   if (window.__vodUnmuterUI) return;
   window.__vodUnmuterUI = true;
 
-  let settings = { enabled: true, badge: true, recolor: true, saveAudio: true, saveMode: 'whole', keepDays: 60 };
+  let settings = { enabled: true, badge: true, recolor: true, saveAudio: true, saveMode: 'whole', keepDays: 60, saveQuality: 'high', maxStorageMB: 1000 };
   let state = null;     // latest 'checking' or 'result' message for this VOD
   let version = 0;      // bumped whenever state changes
   let vodId = currentVodId();
@@ -73,6 +73,11 @@
   const savedDate = () => {
     const t = state && state.save && state.save.savedAt;
     return t ? ' on ' + new Date(t).toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) : '';
+  };
+  const QUALITY_LABEL = {
+    original: 'Saved in original quality (lossless)',
+    high: 'Saved in high quality (96 kbps)',
+    small: 'Saved in small size (64 kbps)',
   };
   const mb = (bytes) => `${(bytes / 1e6).toFixed(bytes < 1e7 ? 1 : 0)} MB`;
 
@@ -266,6 +271,11 @@
       const p = sv.savable ? Math.round((sv.saved / sv.savable) * 100) : 0;
       body = [h('div', null, `Saving… ${sv.saved} / ${sv.savable} segments`),
         h('div', { class: 'vu-meter vu-meter-save' }, h('div', { style: `width:${p}%` }))];
+    } else if (sv.limitReached && sv.saved < sv.savable) {
+      body = [h('div', null, `${sv.saved} / ${sv.savable} segments saved`, sv.bytes ? h('span', { class: 'vu-sub' }, ` · ${mb(sv.bytes)}`) : null),
+        h('div', { class: 'vu-no-c', style: 'font-size:12px' },
+          `Storage limit reached (${sv.maxMB >= 1000 ? sv.maxMB / 1000 + ' GB' : sv.maxMB + ' MB'}). Raise it or pick a smaller saved quality in the extension menu.`),
+        sv.saved ? link('Delete saved audio for this VOD', 'deleteSaved') : null];
     } else if (!sv.saved && !sv.savable) {
       body = [h('div', { class: 'vu-sub' }, 'Nothing to save: Twitch already deleted the originals.')];
     } else {
@@ -273,6 +283,9 @@
       body = [
         h('div', null, h('span', { class: all ? 'vu-save-c' : '' }, `${sv.saved} / ${sv.savable}`),
           ' segments saved', sv.bytes ? h('span', { class: 'vu-sub' }, ` · ${mb(sv.bytes)}`) : null),
+        sv.compressing
+          ? h('div', { class: 'vu-sub' }, `Compressing… ${sv.compressing.done} / ${sv.compressing.total}`)
+          : h('div', { class: 'vu-sub' }, QUALITY_LABEL[sv.quality] || ''),
         h('div', { class: 'vu-sub' }, all
           ? 'This VOD stays unmuted after Twitch deletes the originals.'
           : sv.mode === 'watched'

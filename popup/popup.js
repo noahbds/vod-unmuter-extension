@@ -1,10 +1,16 @@
 const api = globalThis.browser || globalThis.chrome;
-const DEFAULTS = { enabled: true, badge: true, recolor: true, saveAudio: true, saveMode: 'whole', keepDays: 60 };
+const DEFAULTS = { enabled: true, badge: true, recolor: true, saveAudio: true, saveMode: 'whole', keepDays: 60, saveQuality: 'high', maxStorageMB: 1000 };
+const NUMBERS = ['keepDays', 'maxStorageMB'];
 const TWITCH_TABS = ['https://www.twitch.tv/*', 'https://m.twitch.tv/*'];
 const $ = (id) => document.getElementById(id);
 
+const QUALITY_HELP = {
+  original: 'Lossless: 1.1 to 2.4 MB per muted minute, depending on the stream',
+  high: '96 kbps, about 0.75 MB per muted minute',
+  small: '64 kbps, about 0.5 MB per muted minute',
+};
 const MODE_HELP = {
-  whole: 'Every muted part that can still be unmuted, in the background (about 1.6 MB per muted minute)',
+  whole: 'Every muted part that can still be unmuted, in the background',
   watched: 'Only the parts you actually play: less download, but unwatched parts are lost',
 };
 
@@ -17,11 +23,11 @@ async function loadSettings() {
     else el.value = String(settings[key]);
     el.addEventListener('change', async () => {
       const value = el.type === 'checkbox' ? el.checked
-        : key === 'keepDays' ? Number(el.value) : el.value;
+        : NUMBERS.includes(key) ? Number(el.value) : el.value;
       await api.storage.sync.set({ [key]: value });
       if (el.hasAttribute('data-reload')) $('note').hidden = false;
       refreshDependents();
-      if (key === 'keepDays') setTimeout(loadSaved, 300); // old saves may expire
+      if (NUMBERS.includes(key)) setTimeout(loadSaved, 300); // old saves may be removed
     });
   }
   refreshDependents();
@@ -34,6 +40,7 @@ function refreshDependents() {
     row.querySelectorAll('select').forEach((s) => { s.disabled = !on; });
   });
   $('saveModeHelp').textContent = MODE_HELP[$('saveMode').value];
+  $('saveQualityHelp').textContent = QUALITY_HELP[$('saveQuality').value];
 }
 
 // ---------------------------------------------------------------- saved audio
@@ -96,9 +103,15 @@ function render(reply) {
       }, '✕')));
   }
   const total = vods.reduce((n, v) => n + v.bytes, 0);
+  const limit = Number($('maxStorageMB').value) * 1e6;
   box.append(el('div', { class: 'total' },
     el('b', null, mb(total)), ` for ${vods.length} VOD${vods.length > 1 ? 's' : ''}`,
-    reply.quota ? ` · browser allows up to ${Math.round(reply.quota / 1e9)} GB for twitch.tv` : ''));
+    limit ? ` · limit ${limit >= 1e9 ? limit / 1e9 + ' GB' : mb(limit)}` : ' · no limit'));
+  if (limit) {
+    const pct = Math.min(100, Math.round((total / limit) * 100));
+    box.append(el('div', { class: 'meter', role: 'img', 'aria-label': `${pct}% of the storage limit used` },
+      el('div', { style: `width:${pct}%` })));
+  }
   $('deleteAll').hidden = false;
 }
 

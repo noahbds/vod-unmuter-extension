@@ -5,7 +5,7 @@
 (() => {
   'use strict';
   const api = globalThis.browser || globalThis.chrome;
-  const DEFAULTS = { enabled: true, badge: true, recolor: true, saveAudio: true, saveMode: 'whole', keepDays: 60 };
+  const DEFAULTS = { enabled: true, badge: true, recolor: true, saveAudio: true, saveMode: 'whole', keepDays: 60, saveQuality: 'high', maxStorageMB: 1000 };
 
   async function send() {
     let settings = DEFAULTS;

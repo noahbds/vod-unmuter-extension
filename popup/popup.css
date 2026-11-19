@@ -82,4 +82,7 @@ button.icon { padding: 2px 7px; }
 .total { margin-top: 6px; color: var(--muted); font-size: 12px; }
 .total b { color: var(--saved); }
 
+.meter { height: 6px; border-radius: 3px; background: var(--track); overflow: hidden; margin-top: 6px; }
+.meter > div { height: 100%; background: var(--saved); }
+
 .note { margin: 10px 0 0; color: var(--muted); font-size: 12px; }

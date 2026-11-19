@@ -59,6 +59,33 @@
   </div>
 
   <div class="row sub" data-needs="saveAudio">
+    <label for="saveQuality">
+      <strong>Saved quality</strong>
+      <small id="saveQualityHelp"></small>
+    </label>
+    <select id="saveQuality">
+      <option value="original">Original</option>
+      <option value="high">High</option>
+      <option value="small">Small</option>
+    </select>
+  </div>
+
+  <div class="row sub" data-needs="saveAudio">
+    <label for="maxStorageMB">
+      <strong>Storage limit</strong>
+      <small>When full, the oldest saved VODs are deleted first</small>
+    </label>
+    <select id="maxStorageMB">
+      <option value="250">250 MB</option>
+      <option value="500">500 MB</option>
+      <option value="1000">1 GB</option>
+      <option value="2000">2 GB</option>
+      <option value="5000">5 GB</option>
+      <option value="0">No limit</option>
+    </select>
+  </div>
+
+  <div class="row sub" data-needs="saveAudio">
     <label for="keepDays">
       <strong>Delete saved audio after</strong>
       <small>Twitch keeps VODs up to 60 days</small>

@@ -8,7 +8,7 @@ after Twitch deletes it.
 - 🎚️ **Uses every quality as a backup**: if the quality you watch lost a part,
   the sound is borrowed from another quality
 - 💾 **Saves the sound for later**, because Twitch deletes the originals about
-  a day after the stream
+  a day after the stream, compressed (up to −70%) with a storage limit you set
 - 🟢 **Green seek bar** and a **counter next to the ⚙️ button**, with details
   on where each part's sound comes from
 
@@ -22,6 +22,7 @@ after Twitch deletes it.
 - [Saved audio](#saved-audio)
 - [How it works](#how-it-works)
 - [How long Twitch keeps the original audio](#how-long-twitch-keeps-the-original-audio)
+- [Other ways to get the audio back](#other-ways-to-get-the-audio-back)
 - [Privacy](#privacy)
 - [Troubleshooting](#troubleshooting)
 - [Project files](#project-files)
@@ -99,6 +100,8 @@ Click the extension's icon in the toolbar.
 | **Green seek bar** | On | Recolors muted parts and shows details on hover |
 | **Save audio for later** | On | Keeps the sound of muted parts on this computer (see below) |
 | **What to save** | Whole VOD | *Whole VOD*: every part that can still be unmuted, in the background. *Parts I play*: only what you watch (less download, but unwatched parts are lost when Twitch deletes them) |
+| **Saved quality** | High | *Original*: lossless. *High*: 96 kbps. *Small*: 64 kbps. See [compression](#compression) |
+| **Storage limit** | 1 GB | 250 MB to 5 GB, or no limit. When full, the oldest saved VODs are deleted first |
 | **Delete saved audio after** | 60 days | 7 days, 30 days, 60 days, 6 months or never. Twitch keeps VODs at most 60 days |
 
 ---
@@ -109,11 +112,45 @@ Twitch deletes the original audio of muted parts **about a day after the
 stream ends** (see [the measurements](#how-long-twitch-keeps-the-original-audio)).
 After that, the only way to hear those parts is a copy saved before.
 
-**What gets saved:** only the sound of the muted parts, never the video. That's
-about **1.6 MB per minute of muted audio**: a VOD with 30 muted minutes takes
-about 50 MB. In *Whole VOD* mode, the extension downloads the smallest quality
-that still has each original, so saving is quick. A 43-minute test took 10
-seconds and about 80 MB of download.
+**What gets saved:** only the sound of the muted parts, never the video. In
+*Whole VOD* mode the extension downloads, for each muted part, the smallest
+quality that still has the original with full-quality sound (480p or higher:
+160p and 360p can have slightly worse sound), so saving is quick. A 43-minute
+test took 10 seconds and about 80 MB of download.
+
+### Compression
+
+Saving happens in two steps, so it never slows down what you're watching:
+
+1. **While saving:** the original sound is stored losslessly compressed
+   (deflate, about −13% to −20%).
+2. **In the background, a few seconds later:** with *High* or *Small* quality,
+   it's re-encoded to a lower bitrate with the browser's own AAC encoder
+   (WebCodecs).
+
+| Saved quality | Size per muted minute | Notes |
+|---|---|---|
+| Original | 1.1–2.4 MB | Lossless. Streams use 160 to 320 kbps audio, so size varies |
+| **High** (default) | **≈ 0.75 MB** | 96 kbps. Measured: a 323 kbps stream went from 10.4 MB to 3.0 MB (−71%) |
+| Small | ≈ 0.5 MB | 64 kbps |
+
+Re-encoding is seamless: AAC encoders add about 44 ms of silence at the start
+of every encode, which would leave a gap every 10 seconds. The extension
+encodes each segment with the end of the previous one in front of it and cuts
+exactly at the segment's start. The encoder's delay is measured on your machine
+the first time. Tested result: the restored sound is in sync to the sample,
+with no dip at the joins.
+
+If your browser can't encode AAC (often Firefox), saved audio simply stays in
+lossless *Original* quality. Saves made by version 3.0 are compressed the next
+time you open that VOD.
+
+### Storage limit
+
+Set in the popup (default 1 GB). When a new save doesn't fit, the **oldest
+saved VODs are deleted first**. If the VOD you're watching doesn't fit on its
+own, saving stops and the counter's panel says so. Compression frees space, so
+saving resumes by itself when it can.
 
 **When it's saved:** whenever you open a VOD while Twitch still has the
 originals, usually within about a day of the stream. The extension can't save
@@ -169,9 +206,13 @@ Technical notes:
 - File checks use `GET` requests cancelled right after the headers, because
   `HEAD` requests fail at random on Twitch's CDN.
 - The audio splice works on the MPEG-TS packets directly (PAT/PMT, audio PID,
-  continuity counters). It checks that the audio starts at the same time
-  (±0.1 s) before using it. Output was verified with ffmpeg: the video stream
-  is identical to Twitch's and the audio decodes with no errors.
+  continuity counters, timestamps). Audio is placed after the stream table so
+  players recognize it from the first packet. It checks that the audio starts
+  at the same time (±0.1 s) before using it. Output was verified with ffmpeg:
+  the video stream is identical to Twitch's and the audio decodes with no
+  errors.
+- Re-encoded saves are stored as plain AAC frames and turned back into MPEG-TS
+  packets (with the original timestamps) only when played.
 
 ---
 
@@ -187,12 +228,44 @@ Twitch doesn't document it. We measured 81 VODs from 15 channels in November
 | 4–60 days | 63 | None |
 
 So the originals disappear somewhere between **13 and 32 hours after the
-stream ends**, probably on a 24-hour timer. Lower qualities (160p, 360p) lose
-theirs first. VODs are muted while the stream is still live, so a long stream
+stream ends**. It isn't one sudden deletion: blocks disappear one after
+another over those hours, and lower qualities (160p, 360p) lose theirs first.
+One VOD went from fully restorable to 181/182 within a few hours, and another
+was down to 25 of 204 segments ten hours after the stream. VODs are muted while the stream is still live, so a long stream
 already has muted parts before it ends.
 
 **In practice:** open a VOD within about a day of the stream and leave *Save
 audio for later* on.
+
+---
+
+## Other ways to get the audio back
+
+We searched for other ways to recover audio after Twitch deletes the
+originals (November 2026). In short: **there are none on Twitch's side.**
+
+- **Every known tool uses the same files.** TwitchDownloader, twitch-dlp,
+  VodRecovery and TwitchRecover all unmute by fetching the original `.ts`
+  files instead of the `-muted` ones, or the `index-dvr.m3u8` playlist, which
+  lists the same originals. twitch-dlp can also take the sound from another
+  quality, like this extension. All of them stop working once Twitch deletes
+  the files ([TwitchDownloader #1309](https://github.com/lay295/TwitchDownloader/issues/1309),
+  [#210](https://github.com/lay295/TwitchDownloader/issues/210),
+  [twitch-dlp](https://github.com/DmitryScaletta/twitch-dlp)).
+- **The muted file has nothing left.** Its sound is replaced by digital silence
+  (measured at −91 dB), not lowered.
+- **If the streamer uses OBS's "Twitch VOD Track"**, music was never in the
+  VOD in the first place, so even the originals are silent for it
+  ([guide](https://github.com/Hyphen-ated/no-music-in-vods-tutorial)).
+- **Outside Twitch:** clips made during the stream are separate files and may
+  keep the sound for the moment they cover. Streamers' own YouTube uploads
+  usually cut or replace the same music.
+
+So saving the sound in time, which this extension does, is the only reliable
+way. Others have built the same idea: a TwitchDownloader fork adds "saved clean
+audio" playback ([pull request](https://github.com/pnsbadr/TwitchDownloader/pull/9)),
+and another browser extension saves recovered parts as files
+([Twitch-VOD-Unmute](https://github.com/Pouare514/Twitch-VOD-Unmute)).
 
 ---
 
@@ -224,6 +297,10 @@ every quality. Only a copy saved earlier can help then.
 **The popup says "Open any Twitch page"**
 Saved audio lives in twitch.tv's storage, so the popup needs a Twitch tab to
 read it.
+
+**"Storage limit reached" in the counter's panel**
+The VOD doesn't fit in your limit. Raise *Storage limit*, choose a smaller
+*Saved quality*, or delete older saves in the popup.
 
 **Saved audio disappeared**
 It's deleted along with twitch.tv's site data (clearing cookies / browsing
