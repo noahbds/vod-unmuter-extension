@@ -7,7 +7,7 @@
   if (window.__vodUnmuterUI) return;
   window.__vodUnmuterUI = true;
 
-  let settings = { enabled: true, badge: true, recolor: true };
+  let settings = { enabled: true, badge: true, recolor: true, saveAudio: true, saveMode: 'whole', keepDays: 60 };
   let state = null;     // latest 'checking' or 'result' message for this VOD
   let version = 0;      // bumped whenever state changes
   let vodId = currentVodId();
@@ -70,6 +70,12 @@
     return `${Math.floor(s / 3600)}h ${pad((s % 3600) / 60)}m`;
   }
 
+  const savedDate = () => {
+    const t = state && state.save && state.save.savedAt;
+    return t ? ' on ' + new Date(t).toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) : '';
+  };
+  const mb = (bytes) => `${(bytes / 1e6).toFixed(bytes < 1e7 ? 1 : 0)} MB`;
+
   // Plain-language description of where a part's sound comes from.
   function explainSource(src) {
     const watching = (state && state.quality) || 'this quality';
@@ -80,6 +86,9 @@
       case 'backup': return {
         color: '#22c55e', name: `Twitch's unmuted backup (${src.quality})`,
         why: 'A spare unmuted copy Twitch kept next to the muted file.' };
+      case 'saved': return {
+        color: '#a970ff', name: 'Saved copy on this computer',
+        why: `Saved by the extension${savedDate()} while Twitch still had the original.` };
       case 'other': return {
         color: '#38bdf8', name: `Sound from the ${src.quality} version`,
         why: `Deleted in ${watching}, still there in other qualities. Only the sound is borrowed; the picture stays ${watching}.` };
@@ -134,7 +143,7 @@
     .vu-ctrl:hover .vu-panel, .vu-ctrl.vu-open .vu-panel { display: block; }
     .vu-panel-inner {
       font-weight: 500; line-height: 1.35; cursor: default;
-      width: 300px; max-height: 260px; overflow-y: auto;
+      width: 310px; max-height: 340px; overflow-y: auto;
       background: rgba(14, 14, 16, 0.94); border: 1px solid rgba(255,255,255,.08);
       border-radius: 10px; padding: 10px 12px; box-shadow: 0 6px 24px rgba(0,0,0,.45);
     }
@@ -163,6 +172,14 @@
     .vu-src-name { font-weight: 600; }
     .vu-src-why { color: #adadb8; font-size: 11.5px; }
     .vu-via { color: #adadb8; font-size: 11.5px; }
+    .vu-save { margin: 0 0 10px; padding: 8px 0; border-top: 1px solid rgba(255,255,255,.08); border-bottom: 1px solid rgba(255,255,255,.08); }
+    .vu-save > div + div { margin-top: 3px; }
+    .vu-save-c { color: #bf94ff; font-weight: 700; }
+    .vu-meter.vu-meter-save { background: rgba(255,255,255,.12); margin: 4px 0 0; }
+    .vu-meter.vu-meter-save > div { background: #a970ff; }
+    .vu-link { all: unset; cursor: pointer; color: #bf94ff; font-size: 12px; margin-top: 4px; }
+    .vu-link:hover { text-decoration: underline; }
+    .vu-link:focus-visible { outline: 2px solid #a970ff; outline-offset: 2px; border-radius: 2px; }
   `;
   const style = h('style', { id: 'vod-unmuter-style' }, css);
   (document.head || document.documentElement).append(style);
@@ -208,13 +225,15 @@
           h('span', null, 'Muted segments'), h('span', null, muted),
           h('span', null, 'Unmuted'), h('span', { class: 'vu-ok-c' }, restored),
           state.fromOther ? [h('span', null, '…using other qualities'), h('span', null, state.fromOther)] : null,
+          state.fromSaved ? [h('span', null, '…using your saved copy'), h('span', null, state.fromSaved)] : null,
           h('span', null, 'Still muted'), h('span', { class: muted - restored ? 'vu-no-c' : '' }, muted - restored),
           h('span', null, 'Audio restored'), h('span', null, `${span(state.restoredSeconds)} / ${span(state.mutedSeconds)}`)),
         h('div', { class: 'vu-meter', title: `${pct}% of the muted time restored` },
           h('div', { style: `width:${pct}%` })),
+        savedSection(),
         h('div', { class: 'vu-list-title' }, 'Muted parts of this VOD'),
         state.ranges.map((r) => h('div', { class: 'vu-row' },
-          h('span', { class: 'vu-dot', style: `background:${r.restored ? '#22c55e' : '#e84848'}` }),
+          h('span', { class: 'vu-dot', style: `background:${!r.restored ? '#e84848' : (r.sources || []).every((x) => x.kind === 'saved') ? '#a970ff' : '#22c55e'}` }),
           h('span', null, `${clock(r.start)} – ${clock(r.end)}`),
           h('span', { class: 'vu-len' }, r.restored ? span(r.end - r.start) : 'still muted',
             viaText(r)))),
@@ -224,6 +243,45 @@
           : null));
 
     badge.append(button, panel);
+  }
+
+  // "Saved on this computer" part of the panel.
+  function savedSection() {
+    const sv = state.save;
+    if (!sv) return null;
+    const send = (type) => (e) => {
+      e.stopPropagation();
+      channel.postMessage({ type, vodKey: state.vodKey });
+    };
+    const link = (label, type) => h('button', { class: 'vu-link', onclick: send(type) }, label);
+    let body;
+    if (!sv.enabled) {
+      body = [h('div', { class: 'vu-sub' },
+        'Saving is off. Turn on "Save audio for later" in the extension menu to keep this VOD unmuted after Twitch deletes the originals (about a day after the stream).')];
+      if (sv.saved) body.push(h('div', { class: 'vu-sub' }, `Still saved from before: ${sv.saved} segments · ${mb(sv.bytes)}`));
+    } else if (sv.paused && !sv.saved) {
+      body = [h('div', { class: 'vu-sub' }, 'Deleted. Nothing is saved for this VOD.'),
+        sv.savable ? link('Save it again', 'saveNow') : null];
+    } else if (sv.active) {
+      const p = sv.savable ? Math.round((sv.saved / sv.savable) * 100) : 0;
+      body = [h('div', null, `Saving… ${sv.saved} / ${sv.savable} segments`),
+        h('div', { class: 'vu-meter vu-meter-save' }, h('div', { style: `width:${p}%` }))];
+    } else if (!sv.saved && !sv.savable) {
+      body = [h('div', { class: 'vu-sub' }, 'Nothing to save: Twitch already deleted the originals.')];
+    } else {
+      const all = sv.saved >= sv.savable;
+      body = [
+        h('div', null, h('span', { class: all ? 'vu-save-c' : '' }, `${sv.saved} / ${sv.savable}`),
+          ' segments saved', sv.bytes ? h('span', { class: 'vu-sub' }, ` · ${mb(sv.bytes)}`) : null),
+        h('div', { class: 'vu-sub' }, all
+          ? 'This VOD stays unmuted after Twitch deletes the originals.'
+          : sv.mode === 'watched'
+            ? 'Only the parts you play are saved (change this in the extension menu).'
+            : 'The rest will be saved while you watch.'),
+        sv.saved ? link('Delete saved audio for this VOD', 'deleteSaved') : null,
+      ];
+    }
+    return h('div', { class: 'vu-save' }, h('div', { class: 'vu-list-title' }, 'Saved on this computer'), body);
   }
 
   function renderBars() {

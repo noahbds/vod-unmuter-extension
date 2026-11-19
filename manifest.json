@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Twitch VOD Unmuter",
-  "version": "2.0.0",
-  "description": "Restores muted sections of Twitch VODs when the original audio still exists, with an on-screen counter and a green seek bar.",
+  "version": "3.0.0",
+  "description": "Unmutes muted parts of Twitch VODs using the original audio Twitch still stores, and can save that audio so VODs stay unmuted after Twitch deletes it.",
   "icons": {
     "16": "icons/icon-16.png",
     "32": "icons/icon-32.png",
@@ -17,18 +17,38 @@
       "32": "icons/icon-32.png"
     }
   },
-  "permissions": ["storage"],
+  "permissions": [
+    "storage"
+  ],
+  "host_permissions": [
+    "https://www.twitch.tv/*",
+    "https://m.twitch.tv/*",
+    "https://player.twitch.tv/*"
+  ],
   "content_scripts": [
     {
-      "matches": ["https://www.twitch.tv/*", "https://m.twitch.tv/*", "https://player.twitch.tv/*"],
-      "js": ["src/hook.js", "src/ui.js"],
+      "matches": [
+        "https://www.twitch.tv/*",
+        "https://m.twitch.tv/*",
+        "https://player.twitch.tv/*"
+      ],
+      "js": [
+        "src/hook.js",
+        "src/ui.js"
+      ],
       "run_at": "document_start",
       "world": "MAIN",
       "all_frames": true
     },
     {
-      "matches": ["https://www.twitch.tv/*", "https://m.twitch.tv/*", "https://player.twitch.tv/*"],
-      "js": ["src/bridge.js"],
+      "matches": [
+        "https://www.twitch.tv/*",
+        "https://m.twitch.tv/*",
+        "https://player.twitch.tv/*"
+      ],
+      "js": [
+        "src/bridge.js"
+      ],
       "run_at": "document_start",
       "all_frames": true
     }
@@ -37,7 +57,11 @@
     "gecko": {
       "id": "twitch-vod-unmuter@local",
       "strict_min_version": "128.0",
-      "data_collection_permissions": { "required": ["none"] }
+      "data_collection_permissions": {
+        "required": [
+          "none"
+        ]
+      }
     }
   }
 }

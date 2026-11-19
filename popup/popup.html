@@ -11,18 +11,20 @@
     <h1>VOD Unmuter</h1>
   </header>
 
+  <h2>Unmuting</h2>
+
   <label class="row">
     <span>
       <strong>Restore muted audio</strong>
       <small>Use Twitch's original audio when it still exists</small>
     </span>
-    <input type="checkbox" id="enabled">
+    <input type="checkbox" id="enabled" data-reload>
   </label>
 
   <label class="row">
     <span>
-      <strong>On-screen counter</strong>
-      <small>Shows how many muted segments were unmuted</small>
+      <strong>Counter in the player</strong>
+      <small>Next to the settings button: how many muted parts were unmuted</small>
     </span>
     <input type="checkbox" id="badge">
   </label>
@@ -34,6 +36,49 @@
     </span>
     <input type="checkbox" id="recolor">
   </label>
+
+  <h2>Save audio for later</h2>
+
+  <label class="row">
+    <span>
+      <strong>Save audio for later</strong>
+      <small>Twitch deletes the originals about a day after a stream. Keep their sound on this computer so the VOD stays unmuted.</small>
+    </span>
+    <input type="checkbox" id="saveAudio">
+  </label>
+
+  <div class="row sub" data-needs="saveAudio">
+    <label for="saveMode">
+      <strong>What to save</strong>
+      <small id="saveModeHelp"></small>
+    </label>
+    <select id="saveMode">
+      <option value="whole">Whole VOD</option>
+      <option value="watched">Parts I play</option>
+    </select>
+  </div>
+
+  <div class="row sub" data-needs="saveAudio">
+    <label for="keepDays">
+      <strong>Delete saved audio after</strong>
+      <small>Twitch keeps VODs up to 60 days</small>
+    </label>
+    <select id="keepDays">
+      <option value="7">7 days</option>
+      <option value="30">30 days</option>
+      <option value="60">60 days</option>
+      <option value="180">6 months</option>
+      <option value="0">Never</option>
+    </select>
+  </div>
+
+  <h2 class="split">
+    <span>Saved audio</span>
+    <button type="button" id="deleteAll" class="danger" hidden>Delete all</button>
+  </h2>
+  <div id="saved" class="saved" aria-live="polite">
+    <p class="muted">Loading…</p>
+  </div>
 
   <p class="note" id="note" hidden>Reload the VOD for this to take effect.</p>
 
