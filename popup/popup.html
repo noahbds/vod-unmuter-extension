@@ -1,0 +1,42 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Twitch VOD Unmuter</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <header>
+    <img src="../icons/icon-48.png" alt="" width="28" height="28">
+    <h1>VOD Unmuter</h1>
+  </header>
+
+  <label class="row">
+    <span>
+      <strong>Restore muted audio</strong>
+      <small>Use Twitch's original audio when it still exists</small>
+    </span>
+    <input type="checkbox" id="enabled">
+  </label>
+
+  <label class="row">
+    <span>
+      <strong>On-screen counter</strong>
+      <small>Shows how many muted segments were unmuted</small>
+    </span>
+    <input type="checkbox" id="badge">
+  </label>
+
+  <label class="row">
+    <span>
+      <strong>Green seek bar</strong>
+      <small>Unmuted parts in green, details on hover</small>
+    </span>
+    <input type="checkbox" id="recolor">
+  </label>
+
+  <p class="note" id="note" hidden>Reload the VOD for this to take effect.</p>
+
+  <script src="popup.js"></script>
+</body>
+</html>

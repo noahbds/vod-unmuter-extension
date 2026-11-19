@@ -1,0 +1,370 @@
+// Runs in the page's MAIN world. Adds the unmute counter next to the player's
+// settings button, recolors the
+// seek bar (green = audio restored, red = still muted) and shows details when
+// hovering a muted/unmuted part of the seek bar.
+(() => {
+  'use strict';
+  if (window.__vodUnmuterUI) return;
+  window.__vodUnmuterUI = true;
+
+  let settings = { enabled: true, badge: true, recolor: true };
+  let state = null;     // latest 'checking' or 'result' message for this VOD
+  let version = 0;      // bumped whenever state changes
+  let vodId = currentVodId();
+  let pinned = false;   // panel kept open by a click
+
+  // ---------------------------------------------------------------- helpers
+  function currentVodId() {
+    const m = location.pathname.match(/\/videos?\/(\d+)/);
+    if (m) return m[1];
+    const v = new URLSearchParams(location.search).get('video');
+    return v ? v.replace(/^v/, '') : null;
+  }
+
+  function h(tag, attrs, ...children) {
+    const el = document.createElement(tag);
+    for (const [k, v] of Object.entries(attrs || {})) {
+      if (k === 'class') el.className = v;
+      else if (k === 'style') el.style.cssText = v;
+      else if (k.startsWith('on')) el.addEventListener(k.slice(2), v);
+      else el.setAttribute(k, v);
+    }
+    for (const c of children.flat(Infinity)) {
+      if (c == null || c === false) continue;
+      el.append(c instanceof Node ? c : document.createTextNode(String(c)));
+    }
+    return el;
+  }
+
+  function speakerIcon(on) {
+    const NS = 'http://www.w3.org/2000/svg';
+    const svg = document.createElementNS(NS, 'svg');
+    svg.setAttribute('viewBox', '0 0 24 24');
+    svg.setAttribute('class', 'vu-icon');
+    const path = (d, extra) => {
+      const p = document.createElementNS(NS, 'path');
+      p.setAttribute('d', d);
+      for (const [k, v] of Object.entries(extra || {})) p.setAttribute(k, v);
+      svg.append(p);
+    };
+    path('M4 9h4l5-4v14l-5-4H4z', { fill: 'currentColor' });
+    if (on) {
+      path('M16 9a4 4 0 0 1 0 6', { fill: 'none', stroke: 'currentColor', 'stroke-width': '2', 'stroke-linecap': 'round' });
+      path('M18.5 6.5a7.5 7.5 0 0 1 0 11', { fill: 'none', stroke: 'currentColor', 'stroke-width': '2', 'stroke-linecap': 'round' });
+    } else {
+      path('M16 9l5 6M21 9l-5 6', { fill: 'none', stroke: 'currentColor', 'stroke-width': '2', 'stroke-linecap': 'round' });
+    }
+    return svg;
+  }
+
+  const pad = (n) => String(Math.floor(n)).padStart(2, '0');
+  function clock(s) {
+    s = Math.max(0, Math.round(s));
+    const hh = Math.floor(s / 3600), mm = Math.floor((s % 3600) / 60), ss = s % 60;
+    return hh ? `${hh}:${pad(mm)}:${pad(ss)}` : `${mm}:${pad(ss)}`;
+  }
+  function span(s) {
+    s = Math.round(s);
+    if (s < 60) return `${s}s`;
+    if (s < 3600) return `${Math.floor(s / 60)}m ${pad(s % 60)}s`;
+    return `${Math.floor(s / 3600)}h ${pad((s % 3600) / 60)}m`;
+  }
+
+  // Plain-language description of where a part's sound comes from.
+  function explainSource(src) {
+    const watching = (state && state.quality) || 'this quality';
+    switch (src.kind) {
+      case 'original': return {
+        color: '#22c55e', name: `Original ${src.quality} file`,
+        why: 'The unmuted file for the quality you are watching still exists.' };
+      case 'backup': return {
+        color: '#22c55e', name: `Twitch's unmuted backup (${src.quality})`,
+        why: 'A spare unmuted copy Twitch kept next to the muted file.' };
+      case 'other': return {
+        color: '#38bdf8', name: `Sound from the ${src.quality} version`,
+        why: `Deleted in ${watching}, still there in other qualities. Only the sound is borrowed; the picture stays ${watching}.` };
+      default: return {
+        color: '#38bdf8', name: `Sound from the ${src.quality} unmuted backup`,
+        why: `Only the sound is borrowed; the picture stays ${watching}.` };
+    }
+  }
+
+  function findPlayer() {
+    const players = document.querySelectorAll('[data-a-target="video-player"]');
+    for (const p of players) if (p.querySelector('.seekbar-bar')) return p;
+    return players[0] || null;
+  }
+
+  // ------------------------------------------------------------------ styles
+  const css = `
+    html.vu-recolor .seekbar-segment[style*="212, 73, 73"] { opacity: 0 !important; }
+    .vu-bars { position: absolute; inset: 0; pointer-events: none; z-index: 1; }
+    .vu-bar { position: absolute; top: 0; bottom: 0; min-width: 2px; }
+    .vu-bar.vu-ok { background: rgba(34, 197, 94, 0.9); }
+    .vu-bar.vu-no { background: rgba(232, 72, 72, 0.85); }
+
+    /* Button in the player's control bar, next to the settings gear. */
+    .vu-ctrl {
+      position: relative; display: flex; align-items: center; margin-right: 4px;
+      font: 600 13px/1 Inter, Roobert, "Helvetica Neue", Helvetica, Arial, sans-serif;
+      color: #efeff1; user-select: none;
+    }
+    .vu-ctrl.vu-floating { position: absolute; top: 10px; left: 10px; z-index: 2000; }
+    .vu-btn {
+      all: unset; box-sizing: border-box; cursor: pointer;
+      display: flex; align-items: center; gap: 6px; height: 30px; padding: 0 8px;
+      border-radius: 4px; font-variant-numeric: tabular-nums; white-space: nowrap;
+    }
+    .vu-floating .vu-btn { background: rgba(14, 14, 16, 0.82); border-radius: 999px; }
+    .vu-btn:hover, .vu-ctrl.vu-open .vu-btn { background: rgba(255, 255, 255, 0.15); }
+    .vu-btn:focus-visible { outline: 2px solid #a970ff; outline-offset: 1px; }
+    .vu-btn .vu-of { color: #adadb8; font-weight: 500; }
+    .vu-icon { width: 20px; height: 20px; flex: none; }
+    .vu-ok-c { color: #22c55e; } .vu-part-c { color: #facc15; } .vu-no-c { color: #f87171; }
+    .vu-sub { color: #adadb8; font-size: 12px; font-weight: 500; line-height: 1.4; }
+    .vu-spin {
+      width: 14px; height: 14px; flex: none; border-radius: 50%;
+      border: 2px solid rgba(255,255,255,.2); border-top-color: #22c55e;
+      animation: vu-spin .8s linear infinite;
+    }
+    @keyframes vu-spin { to { transform: rotate(360deg); } }
+
+    .vu-panel { display: none; position: absolute; bottom: 100%; right: 0; padding-bottom: 8px; z-index: 2000; }
+    .vu-floating .vu-panel { bottom: auto; top: 100%; right: auto; left: 0; padding: 6px 0 0; }
+    .vu-ctrl:hover .vu-panel, .vu-ctrl.vu-open .vu-panel { display: block; }
+    .vu-panel-inner {
+      font-weight: 500; line-height: 1.35; cursor: default;
+      width: 300px; max-height: 260px; overflow-y: auto;
+      background: rgba(14, 14, 16, 0.94); border: 1px solid rgba(255,255,255,.08);
+      border-radius: 10px; padding: 10px 12px; box-shadow: 0 6px 24px rgba(0,0,0,.45);
+    }
+    .vu-stats { display: grid; grid-template-columns: 1fr auto; gap: 2px 12px; margin-bottom: 8px; }
+    .vu-stats span:nth-child(odd) { color: #adadb8; }
+    .vu-meter { height: 6px; border-radius: 3px; background: rgba(232,72,72,.85); overflow: hidden; margin: 6px 0 10px; }
+    .vu-meter > div { height: 100%; background: #22c55e; }
+    .vu-list-title { color: #adadb8; font-size: 11px; text-transform: uppercase; letter-spacing: .06em; margin-bottom: 4px; }
+    .vu-row { display: flex; align-items: center; gap: 8px; padding: 3px 0; font-variant-numeric: tabular-nums; }
+    .vu-dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
+    .vu-row .vu-len { margin-left: auto; color: #adadb8; }
+
+    .vu-tip {
+      position: absolute; z-index: 2001; pointer-events: none;
+      transform: translate(-50%, -100%);
+      font: 500 12px/1.4 Inter, Roobert, "Helvetica Neue", Helvetica, Arial, sans-serif;
+      color: #efeff1; width: max-content; max-width: 320px;
+      background: rgba(14, 14, 16, 0.94); border-radius: 8px; padding: 8px 11px;
+      box-shadow: 0 4px 16px rgba(0,0,0,.45);
+    }
+    .vu-tip-head { font-weight: 700; margin-bottom: 2px; }
+    .vu-tip-line { color: #adadb8; font-variant-numeric: tabular-nums; }
+    .vu-tip-title { color: #adadb8; font-size: 10.5px; text-transform: uppercase; letter-spacing: .06em; margin: 7px 0 3px; }
+    .vu-src { display: grid; grid-template-columns: auto 1fr; gap: 0 7px; margin-top: 4px; }
+    .vu-src .vu-dot { margin-top: 5px; }
+    .vu-src-name { font-weight: 600; }
+    .vu-src-why { color: #adadb8; font-size: 11.5px; }
+    .vu-via { color: #adadb8; font-size: 11.5px; }
+  `;
+  const style = h('style', { id: 'vod-unmuter-style' }, css);
+  (document.head || document.documentElement).append(style);
+
+  // ---------------------------------------------------------------- elements
+  const badge = h('div', { class: 'vu-ctrl' });
+  const bars = h('div', { class: 'vu-bars' });
+  const tip = h('div', { class: 'vu-tip' });
+  let badgeVersion = -1, barsVersion = -1;
+
+  function renderBadge() {
+    if (badgeVersion === version) return;
+    badgeVersion = version;
+    badge.replaceChildren();
+
+    const toggle = (e) => {
+      e.stopPropagation();
+      pinned = !pinned;
+      badge.classList.toggle('vu-open', pinned);
+    };
+
+    if (state.type === 'checking') {
+      const pct = Math.round(((state.done || 0) / state.muted) * 100);
+      badge.append(h('button', { class: 'vu-btn', title: `Checking ${state.muted} muted segments…` },
+        h('div', { class: 'vu-spin' }), `${pct}%`));
+      return;
+    }
+
+    const { restored, muted } = state;
+    const cls = restored === muted ? 'vu-ok-c' : restored ? 'vu-part-c' : 'vu-no-c';
+    const pct = state.mutedSeconds ? Math.round((state.restoredSeconds / state.mutedSeconds) * 100) : 0;
+
+    const button = h('button', {
+      class: 'vu-btn', 'aria-haspopup': 'true',
+      'aria-label': `Unmuted ${restored} of ${muted} muted segments`, onclick: toggle,
+    }, h('span', { class: cls }, speakerIcon(restored > 0)),
+      h('span', null, restored, h('span', { class: 'vu-of' }, ` / ${muted}`)));
+
+    const panel = h('div', { class: 'vu-panel', onclick: (e) => e.stopPropagation() },
+      h('div', { class: 'vu-panel-inner' },
+        h('div', { class: 'vu-stats' },
+          state.quality ? [h('span', null, 'Quality'), h('span', null, state.quality)] : null,
+          h('span', null, 'Muted segments'), h('span', null, muted),
+          h('span', null, 'Unmuted'), h('span', { class: 'vu-ok-c' }, restored),
+          state.fromOther ? [h('span', null, '…using other qualities'), h('span', null, state.fromOther)] : null,
+          h('span', null, 'Still muted'), h('span', { class: muted - restored ? 'vu-no-c' : '' }, muted - restored),
+          h('span', null, 'Audio restored'), h('span', null, `${span(state.restoredSeconds)} / ${span(state.mutedSeconds)}`)),
+        h('div', { class: 'vu-meter', title: `${pct}% of the muted time restored` },
+          h('div', { style: `width:${pct}%` })),
+        h('div', { class: 'vu-list-title' }, 'Muted parts of this VOD'),
+        state.ranges.map((r) => h('div', { class: 'vu-row' },
+          h('span', { class: 'vu-dot', style: `background:${r.restored ? '#22c55e' : '#e84848'}` }),
+          h('span', null, `${clock(r.start)} – ${clock(r.end)}`),
+          h('span', { class: 'vu-len' }, r.restored ? span(r.end - r.start) : 'still muted',
+            viaText(r)))),
+        restored < muted
+          ? h('div', { class: 'vu-sub', style: 'margin-top:8px' },
+              'Red parts can\'t be restored: Twitch deleted the original audio in every quality.')
+          : null));
+
+    badge.append(button, panel);
+  }
+
+  function renderBars() {
+    if (barsVersion === version) return;
+    barsVersion = version;
+    bars.replaceChildren(...state.ranges.map((r) => h('span', {
+      class: `vu-bar ${r.restored ? 'vu-ok' : 'vu-no'}`,
+      style: `inset-inline-start:${(r.start / state.total) * 100}%;width:${((r.end - r.start) / state.total) * 100}%`,
+    })));
+  }
+
+  // "· via 720p60" when part of a range's sound comes from another quality.
+  function viaText(r) {
+    const others = [...new Set((r.sources || [])
+      .filter((s) => s.kind === 'other' || s.kind === 'other-backup').map((s) => s.quality))];
+    return others.length ? h('span', { class: 'vu-via' }, ` · via ${others.join(', ')}`) : null;
+  }
+
+  // Next to the settings gear in the control bar; floating in the top-left
+  // corner if the player has no gear (some embeds).
+  function placeBadge(player) {
+    const gear = player.querySelector('[data-a-target="player-settings-button"]');
+    // The gear is wrapped in several block elements; climb to the wrapper
+    // that sits directly in the control bar's row, so we end up beside it.
+    const row = gear && gear.closest('.player-controls__right-control-group');
+    let slot = gear;
+    while (slot && row && slot.parentElement !== row) slot = slot.parentElement;
+    if (slot && row) {
+      badge.classList.remove('vu-floating');
+      if (badge.nextSibling !== slot) slot.parentElement.insertBefore(badge, slot);
+    } else {
+      badge.classList.add('vu-floating');
+      if (badge.parentNode !== player) player.append(badge);
+    }
+  }
+
+  document.addEventListener('click', (e) => {
+    if (pinned && !badge.contains(e.target)) { pinned = false; badge.classList.remove('vu-open'); }
+  }, true);
+
+  // ------------------------------------------------------------------ update
+  function update() {
+    const id = currentVodId();
+    if (id !== vodId) { vodId = id; state = null; version++; }
+
+    const player = findPlayer();
+    const show = !!(state && vodId && player);
+
+    if (show && settings.badge) {
+      placeBadge(player);
+      renderBadge();
+    } else badge.remove();
+
+    const bar = player && player.querySelector('.seekbar-bar');
+    const recolor = show && settings.recolor && state.type === 'result' && bar && state.total > 0;
+    document.documentElement.classList.toggle('vu-recolor', !!recolor);
+    if (recolor) {
+      if (bars.parentNode !== bar) bar.append(bars);
+      renderBars();
+    } else bars.remove();
+
+    if (!recolor) tip.remove();
+  }
+
+  // ------------------------------------------------------------ hover details
+  document.addEventListener('pointermove', (e) => {
+    if (!state || state.type !== 'result' || !settings.recolor || !e.target.closest) { tip.remove(); return; }
+    const area = e.target.closest('[data-a-target="player-seekbar"]');
+    const bar = area && area.querySelector('.seekbar-bar');
+    const player = area && area.closest('[data-a-target="video-player"]');
+    if (!bar || !player) { tip.remove(); return; }
+
+    const br = bar.getBoundingClientRect();
+    let frac = (e.clientX - br.left) / br.width;
+    if (getComputedStyle(bar).direction === 'rtl') frac = 1 - frac;
+    const t = frac * state.total;
+    const tolerance = (4 / br.width) * state.total; // ~4px either side
+    let hit = null, best = Infinity;
+    for (const r of state.ranges) {
+      const d = t < r.start ? r.start - t : t > r.end ? t - r.end : 0;
+      if (d <= tolerance && d < best) { best = d; hit = r; }
+    }
+    if (!hit) { tip.remove(); return; }
+
+    const plural = (n) => `${n} segment${n > 1 ? 's' : ''}`;
+    const sources = hit.sources || [];
+    // (replaceChildren doesn't unpack nested lists, so flatten them first)
+    tip.replaceChildren(...[
+      h('div', { class: 'vu-tip-head ' + (hit.restored ? 'vu-ok-c' : 'vu-no-c') },
+        hit.restored ? '✓ Audio unmuted' : '✕ Still muted'),
+      h('div', { class: 'vu-tip-line' },
+        `${clock(hit.start)} – ${clock(hit.end)} · ${span(hit.end - hit.start)} · ${plural(hit.segments)}`),
+      hit.restored
+        ? [h('div', { class: 'vu-tip-title' }, 'Where the sound comes from'),
+           sources.map((src, i) => {
+             const d = explainSource(src);
+             // Explain each kind once (several qualities share the same reason).
+             if (sources.slice(0, i).some((o) => explainSource(o).why === d.why)) d.why = null;
+             return h('div', { class: 'vu-src' },
+               h('span', { class: 'vu-dot', style: `background:${d.color}` }),
+               h('div', null,
+                 h('div', { class: 'vu-src-name' },
+                   sources.length > 1 ? `${plural(src.segments)}: ${d.name}` : d.name),
+                 d.why ? h('div', { class: 'vu-src-why' }, d.why) : null));
+           })]
+        : h('div', { class: 'vu-src-why', style: 'margin-top:4px' },
+            'Twitch deleted the original sound here in every quality, so there is nothing left to restore.'),
+    ].flat(Infinity));
+
+    if (tip.parentNode !== player) player.append(tip);
+    const clientX = e.clientX;
+    // Twitch draws its preview image a moment later; place the box above it.
+    requestAnimationFrame(() => {
+      const pr = player.getBoundingClientRect();
+      let top = br.top - 14;
+      const preview = player.querySelector('[data-test-selector="vod-seekbar-preview-overlay-preview-image"]');
+      const card = preview && (preview.closest('.tw-balloon') || preview.parentElement);
+      const cr = card && card.getBoundingClientRect();
+      if (cr && cr.height > 0 && cr.bottom <= br.top + 2) top = cr.top - 8;
+      const half = tip.offsetWidth / 2;
+      tip.style.left = `${Math.min(Math.max(clientX - pr.left, half + 6), pr.width - half - 6)}px`;
+      tip.style.top = `${Math.max(top - pr.top, tip.offsetHeight + 4)}px`;
+    });
+  }, true);
+
+  // --------------------------------------------------------------- messaging
+  const channel = new BroadcastChannel('vod-unmuter');
+  channel.addEventListener('message', (ev) => {
+    const m = ev.data;
+    if (!m) return;
+    if (m.type === 'settings') {
+      settings = Object.assign({}, settings, m.settings);
+    } else if (m.type === 'checking') {
+      if (state && state.type === 'result' && state.key === m.key) return;
+      state = m; version++;
+    } else if (m.type === 'result') {
+      state = m; version++;
+    } else return;
+    update();
+  });
+  channel.postMessage({ type: 'hello' });
+
+  setInterval(update, 700);
+})();
