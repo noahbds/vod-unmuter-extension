@@ -224,7 +224,7 @@
     //   { fmt: 'deflate', type, pts, data, packed }  audio packets, lossless
     //   { fmt: 'aac', type, pts, kbps, data }        sound re-encoded to AAC
     //                                                (ADTS frames), smaller
-    //   { type, pts, packets }                       v3.0: uncompressed packets
+    //   { type, pts, packets }                       older: uncompressed packets
     const recBytes = (rec) => (rec.data || rec.packets).byteLength;
     const concat = (parts) => {
       const out = new Uint8Array(parts.reduce((n, b) => n + b.length, 0));

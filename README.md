@@ -154,7 +154,7 @@ the first time. Tested result: the restored sound is in sync to the sample,
 with no dip at the joins.
 
 If your browser can't encode AAC (often Firefox), saved audio simply stays in
-lossless *Original* quality. Saves made by version 3.0 are compressed the next
+lossless *Original* quality. Older uncompressed saves are compressed the next
 time you open that VOD.
 
 ### Storage limit
