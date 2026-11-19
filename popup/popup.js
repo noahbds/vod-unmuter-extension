@@ -1,5 +1,5 @@
 const api = globalThis.browser || globalThis.chrome;
-const DEFAULTS = { enabled: true, badge: true, recolor: true, saveAudio: true, saveMode: 'whole', keepDays: 60, saveQuality: 'high', maxStorageMB: 1000 };
+const DEFAULTS = { enabled: true, badge: true, recolor: true, saveAudio: true, saveMode: 'whole', keepDays: 60, saveQuality: 'high', maxStorageMB: 1000, autoOpenTab: true };
 const NUMBERS = ['keepDays', 'maxStorageMB'];
 const TWITCH_TABS = ['https://www.twitch.tv/*', 'https://m.twitch.tv/*'];
 const $ = (id) => document.getElementById(id);
@@ -37,7 +37,7 @@ function refreshDependents() {
   const on = $('saveAudio').checked;
   document.querySelectorAll('[data-needs="saveAudio"]').forEach((row) => {
     row.classList.toggle('off', !on);
-    row.querySelectorAll('select').forEach((s) => { s.disabled = !on; });
+    row.querySelectorAll('select, input, button').forEach((s) => { s.disabled = !on; });
   });
   $('saveModeHelp').textContent = MODE_HELP[$('saveMode').value];
   $('saveQualityHelp').textContent = QUALITY_HELP[$('saveQuality').value];
@@ -124,5 +124,87 @@ $('deleteAll').addEventListener('click', async () => {
   render(await ask('deleteAll'));
 });
 
+// ------------------------------------------------------------ auto-save
+const ago = (t) => {
+  const m = Math.round((Date.now() - t) / 6e4);
+  return m < 1 ? 'just now' : m < 60 ? `${m} min ago` : `${Math.round(m / 60)} h ago`;
+};
+
+async function renderChannels() {
+  const { autoChannels } = await api.storage.sync.get({ autoChannels: [] });
+  const { autoState } = await api.storage.local.get({ autoState: { vods: {}, channels: {} } });
+  const box = $('channels');
+  box.replaceChildren();
+  if (!autoChannels.length) {
+    box.append(el('p', { class: 'muted' }, 'No channels yet.'));
+  }
+  for (const login of autoChannels) {
+    const ch = autoState.channels[login] || {};
+    const vods = Object.entries(autoState.vods || {})
+      .filter(([, v]) => v.channel === login)
+      .sort((a, b) => new Date(b[1].createdAt) - new Date(a[1].createdAt));
+    const latest = vods[0] && vods[0][1];
+    let status;
+    if (ch.error) status = el('small', { class: 'status-bad' }, ch.error);
+    else if (!ch.lastCheck) status = el('small', null, 'Not checked yet');
+    else if (!latest) status = el('small', null, `No recent VOD · checked ${ago(ch.lastCheck)}`);
+    else if (latest.running) status = el('small', { class: 'status-run' }, `Saving ${latest.live ? 'the live stream' : 'the latest VOD'}…`);
+    else if (latest.error) status = el('small', { class: 'status-bad' }, latest.error);
+    else if (latest.lastRun) {
+      status = el('small', { class: latest.saved >= latest.restorable ? 'status-ok' : '' },
+        latest.muted ? `${latest.live ? 'Live' : 'Latest VOD'}: ${latest.saved}/${latest.restorable} saved` +
+          (latest.muted > latest.restorable ? ` (${latest.muted - latest.restorable} already deleted by Twitch)` : '')
+          : `${latest.live ? 'Live' : 'Latest VOD'}: nothing muted`,
+        ` · ${ago(latest.lastRun)}`);
+    } else status = el('small', null, `Waiting to save · checked ${ago(ch.lastCheck)}`);
+    box.append(el('div', { class: 'vod' },
+      el('div', null, el('b', null, ch.name || login), el('br'), status),
+      el('button', {
+        type: 'button', class: 'icon', title: 'Stop auto-saving this channel', 'aria-label': `Remove ${login}`,
+        onclick: async () => {
+          const { autoChannels: list } = await api.storage.sync.get({ autoChannels: [] });
+          await api.storage.sync.set({ autoChannels: list.filter((c) => c !== login) });
+        },
+      }, '✕')));
+  }
+  $('autoNote').hidden = !autoState.note;
+  $('autoNote').textContent = autoState.note || '';
+}
+
+$('addChannel').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const err = $('channelError');
+  err.hidden = true;
+  // Accept "name", "@name" or a twitch.tv link.
+  const raw = $('channelInput').value.trim();
+  const login = (raw.match(/twitch\.tv\/([A-Za-z0-9_]+)/) || [null, raw.replace(/^@/, '')])[1].toLowerCase();
+  if (!/^[a-z0-9_]{2,25}$/.test(login)) { err.textContent = 'That doesn\'t look like a Twitch channel name.'; err.hidden = false; return; }
+  try {
+    const r = await fetch('https://gql.twitch.tv/gql', {
+      method: 'POST', headers: { 'Client-ID': 'kimne78kx3ncx6brgo4mv6wki5h1ko' },
+      body: JSON.stringify({ query: `query { user(login: ${JSON.stringify(login)}) { login } }` }),
+    }).then((x) => x.json());
+    if (!r.data || !r.data.user) { err.textContent = `No Twitch channel called "${login}".`; err.hidden = false; return; }
+  } catch (x) { /* offline: add it anyway */ }
+  const { autoChannels } = await api.storage.sync.get({ autoChannels: [] });
+  if (!autoChannels.includes(login)) await api.storage.sync.set({ autoChannels: autoChannels.concat(login) });
+  $('channelInput').value = '';
+  api.runtime.sendMessage({ vu: 'autoCheckNow' }).catch(() => {});
+});
+
+$('checkNow').addEventListener('click', async () => {
+  $('checkNow').disabled = true;
+  $('checkNow').textContent = 'Checking…';
+  try { await api.runtime.sendMessage({ vu: 'autoCheckNow' }); } catch (e) { /* ignore */ }
+  $('checkNow').disabled = false;
+  $('checkNow').textContent = 'Check now';
+  renderChannels();
+});
+
+api.storage.onChanged.addListener((changes) => {
+  if (changes.autoState || changes.autoChannels) renderChannels();
+});
+
 loadSettings();
 loadSaved();
+renderChannels();

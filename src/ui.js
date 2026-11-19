@@ -95,7 +95,9 @@
         color: '#a970ff', name: 'Saved copy on this computer',
         why: `Saved by the extension${savedDate()} while Twitch still had the original.` };
       case 'other': return {
-        color: '#38bdf8', name: `Sound from the ${src.quality} version`,
+        color: '#38bdf8',
+        name: src.quality === 'audio_only' ? 'Sound from the audio-only version'
+          : `Sound from the ${src.quality} version` + (/^(160|360)p/.test(src.quality) ? ' (lower sound quality)' : ''),
         why: `Deleted in ${watching}, still there in other qualities. Only the sound is borrowed; the picture stays ${watching}.` };
       default: return {
         color: '#38bdf8', name: `Sound from the ${src.quality} unmuted backup`,

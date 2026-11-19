@@ -9,6 +9,8 @@ after Twitch deletes it.
   the sound is borrowed from another quality
 - 💾 **Saves the sound for later**, because Twitch deletes the originals about
   a day after the stream, compressed (up to −70%) with a storage limit you set
+- 📺 **Auto-saves channels you choose**, even VODs you haven't opened, and
+  live streams as they're muted
 - 🟢 **Green seek bar** and a **counter next to the ⚙️ button**, with details
   on where each part's sound comes from
 
@@ -20,6 +22,7 @@ after Twitch deletes it.
 - [Using it](#using-it)
 - [Settings](#settings)
 - [Saved audio](#saved-audio)
+- [Auto-save channels](#auto-save-channels)
 - [How it works](#how-it-works)
 - [How long Twitch keeps the original audio](#how-long-twitch-keeps-the-original-audio)
 - [Other ways to get the audio back](#other-ways-to-get-the-audio-back)
@@ -50,9 +53,6 @@ sign it through [addons.mozilla.org](https://addons.mozilla.org/developers/)
 as an *unlisted* add-on (free, private, nothing is published), or use Firefox
 Developer Edition / Nightly with `xpinstall.signatures.required` set to
 `false` in `about:config`.
-
-> **Turn off the old Tampermonkey script** (`twitch-vod-unmuter.user.js`) if
-> you installed it, or both will try to unmute at the same time.
 
 ---
 
@@ -103,6 +103,8 @@ Click the extension's icon in the toolbar.
 | **Saved quality** | High | *Original*: lossless. *High*: 96 kbps. *Small*: 64 kbps. See [compression](#compression) |
 | **Storage limit** | 1 GB | 250 MB to 5 GB, or no limit. When full, the oldest saved VODs are deleted first |
 | **Delete saved audio after** | 60 days | 7 days, 30 days, 60 days, 6 months or never. Twitch keeps VODs at most 60 days |
+| **Auto-save channels** | none | Channels whose new VODs are saved without playing them. See [below](#auto-save-channels) |
+| **Open a Twitch tab if needed** | On | Lets auto-save open a small background Twitch tab when none is open |
 
 ---
 
@@ -112,11 +114,21 @@ Twitch deletes the original audio of muted parts **about a day after the
 stream ends** (see [the measurements](#how-long-twitch-keeps-the-original-audio)).
 After that, the only way to hear those parts is a copy saved before.
 
-**What gets saved:** only the sound of the muted parts, never the video. In
-*Whole VOD* mode the extension downloads, for each muted part, the smallest
-quality that still has the original with full-quality sound (480p or higher:
-160p and 360p can have slightly worse sound), so saving is quick. A 43-minute
-test took 10 seconds and about 80 MB of download.
+**What gets saved:** only the sound of the muted parts, never the video. For
+each muted part, the extension downloads the smallest file that still has the
+original with full-quality sound:
+
+| Twitch quality | File size (10 s) | Its sound |
+|---|---|---|
+| audio_only | 0.27 MB | Full quality: identical to Source |
+| 480p / 720p / Source | 1.8 / 4.3 / 10.5 MB | Full quality: identical to Source |
+| 360p | 0.9 MB | Much lower (≈ 67 kbps) |
+| 160p | 0.4 MB | Much lower (≈ 50 kbps) |
+
+So it tries audio_only first, then 480p, 720p, Source, and 360p/160p only as
+a last resort. Measured: 40 muted segments saved in 2 seconds for 10.8 MB of
+download. The same order is used when borrowing sound during playback, and
+the tooltip says when sound comes from 360p/160p.
 
 ### Compression
 
@@ -176,6 +188,30 @@ on this computer only.
 
 ---
 
+## Auto-save channels
+
+Add channels in the popup (name, `@name` or a twitch.tv link). Every 20
+minutes the extension looks for VODs from those channels that are **live or
+ended less than 36 hours ago**, and saves their muted parts without you
+playing them. Live streams are included because Twitch mutes them while
+they're still live; they're re-checked until they end.
+
+- **Where it runs:** in an open Twitch tab, because saved audio lives in
+  twitch.tv's storage and subscriber-only VODs need your Twitch login. If no
+  Twitch tab is open, it opens `twitch.tv/robots.txt` (a tiny text page) in the
+  background and closes it when done. Turn off *Open a Twitch tab if needed*
+  to only use tabs you already have open.
+- **Subscriber-only VODs:** saved if you're logged in to Twitch in this
+  browser with a subscribed account, the same way the player gets access.
+- **Status:** the popup shows each channel's latest VOD, for example
+  *Latest VOD: 181/181 saved (1 already deleted by Twitch) · 5 min ago*, and
+  **Check now** runs a check immediately.
+- **Limits:** the browser has to be running. A computer that's off or asleep
+  for the whole day after a stream misses it. It always uses the *Whole VOD*
+  mode, and follows your saved quality and storage limit.
+
+---
+
 ## How it works
 
 Twitch serves each VOD as a list of 10-second video files (an HLS playlist).
@@ -196,6 +232,8 @@ separately.
    4. the muted file, so playback never breaks.
 3. **In the background**, it checks every muted part to fill the counter and
    seek bar, and (if enabled) saves the sound.
+4. **Auto-save** (`src/background.js`): a timer asks a Twitch tab to do steps
+   2–3 for recent VODs of the chosen channels, without playing them.
 
 It only reports on the quality you're actually watching, since each quality
 can have a different amount left.
@@ -205,6 +243,10 @@ Technical notes:
   hook inside that worker by wrapping `Worker` before the page loads.
 - File checks use `GET` requests cancelled right after the headers, because
   `HEAD` requests fail at random on Twitch's CDN.
+- Every muted segment is checked individually. Twitch deletes originals in a
+  scattered way, with holes inside kept stretches and survivors inside deleted
+  ones, so guessing from a few segments was measurably wrong (up to 17% of
+  recoverable segments missed on one VOD).
 - The audio splice works on the MPEG-TS packets directly (PAT/PMT, audio PID,
   continuity counters, timestamps). Audio is placed after the stream table so
   players recognize it from the first packet. It checks that the audio starts
@@ -274,7 +316,10 @@ and another browser extension saves recovered parts as files
 - Everything happens in your browser. The extension doesn't send data
   anywhere, has no analytics and no server.
 - Its only network requests go to Twitch: the same servers the player already
-  uses for the VOD's video files.
+  uses for the VOD's video files, and Twitch's API to list a channel's VODs.
+- For subscriber-only VODs, auto-save asks Twitch for access with your
+  existing Twitch login, exactly as the player does. The login is read in the
+  Twitch page and only ever sent to Twitch.
 - Saved audio stays on your computer, in twitch.tv's browser storage.
 - Settings are stored with your browser's extension storage (synced if you use
   browser sync).
@@ -302,6 +347,14 @@ read it.
 The VOD doesn't fit in your limit. Raise *Storage limit*, choose a smaller
 *Saved quality*, or delete older saves in the popup.
 
+**Auto-save shows "subscriber-only"**
+The VOD needs a subscription. Log in to Twitch in this browser with a
+subscribed account.
+
+**Auto-save says "Waiting for a Twitch tab to be open"**
+*Open a Twitch tab if needed* is off and no Twitch tab is open. Open one, or
+turn that setting on.
+
 **Saved audio disappeared**
 It's deleted along with twitch.tv's site data (clearing cookies / browsing
 data, some privacy extensions or cleaners), and after the *Delete saved audio
@@ -320,9 +373,8 @@ manifest.json          Extension manifest (Manifest V3, Chrome + Firefox)
 src/hook.js            Runs in the page and in the player's worker: playlists,
                        segments, audio splicing, saving (IndexedDB)
 src/ui.js              Counter, panel, seek bar colors, hover details
-src/bridge.js          Passes settings and popup requests to the page
+src/bridge.js          Passes settings, popup and auto-save requests to the page
+src/background.js      Auto-save timer: finds recent VODs, picks a Twitch tab
 popup/                 Settings and saved-audio manager
 icons/                 Extension icons
-twitch-vod-unmuter.user.js
-                       The original Tampermonkey script (basic unmuting only)
 ```

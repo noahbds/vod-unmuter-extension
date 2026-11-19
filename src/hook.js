@@ -490,6 +490,7 @@
 
     // Only the page instance manages the database for the popup / UI.
     if (IS_PAGE) scope.__vodUnmuterStore = { list: listSaved, remove: deleteSavedVod, expire: expireSaved };
+    if (IS_PAGE) scope.__vodUnmuterAuto = { save: (vodId) => autoSave(vodId) };
 
     // ------------------------------------------------------------ probing
     function makeLimiter(max) {
@@ -543,12 +544,18 @@
     //   "saved"                              copy saved on this computer
     //   "720p60/.ts", "720p60/-unmuted.ts"   another quality (audio only)
     const allDirs = (job) => renditions.get(job.vodBase) || FALLBACK_DIRS;
-    const donorDirs = (job) => allDirs(job).filter((d) => d !== job.dir && d !== 'audio_only');
-    function donorSources(seg) {
-      const list = [];
-      for (const dir of donorDirs(seg.job)) for (const sfx of SUFFIXES) list.push(dir + '/' + sfx);
-      return list;
+    // Other qualities to borrow sound from, best first. Measured: audio_only,
+    // 480p and up all carry the same sound as Source (identical bytes), and
+    // audio_only is by far the smallest download; 360p and 160p have much
+    // lower-bitrate sound (~67 and ~50 kbps), so they come last.
+    const donorDirs = (job) => saveDirs(job).filter((d) => d !== job.dir);
+    // Other qualities: only the original file name. Twitch's "-unmuted"
+    // backup has never turned up in another quality in our tests, and checking
+    // it would double the requests.
+    function donorSources(seg, dirs) {
+      return (dirs || donorDirs(seg.job)).map((dir) => dir + '/.ts');
     }
+
     function urlFor(seg, source) {
       const slash = source.indexOf('/');
       if (slash < 0) return seg.urls[source];
@@ -559,8 +566,8 @@
       for (const sfx of SUFFIXES) if (await probe(urlFor(seg, sfx))) return sfx;
       return null;
     }
-    async function findDonor(seg) {
-      for (const source of donorSources(seg)) if (await probe(urlFor(seg, source))) return source;
+    async function findDonor(seg, dirs) {
+      for (const source of donorSources(seg, dirs)) if (await probe(urlFor(seg, source))) return source;
       return null;
     }
 
@@ -568,24 +575,18 @@
       if (!seg.confirmed) seg.source = source;
     }
 
-    // A run of consecutive muted segments.
-    // Same quality: Twitch keeps or deletes these in whole blocks, so check
-    // the first and last; if they agree, assume the whole run matches.
-    // Saved copies and other qualities are checked segment by segment.
+    // A run of consecutive muted segments. Every segment is checked: Twitch
+    // deletes originals in a scattered way (holes inside kept stretches and
+    // survivors inside deleted ones), so guessing from a few segments was
+    // wrong on real VODs. Order: same quality, saved copy, other qualities.
     async function resolveRun(segs) {
-      const first = await findOwn(segs[0]);
-      const last = segs.length > 1 ? await findOwn(segs[segs.length - 1]) : first;
-      if (first && first === last) segs.forEach((s) => setResult(s, first));
-      else if (!first && !last && segs.length > 2 && !(await findOwn(segs[segs.length >> 1]))) {
-        segs.forEach((s) => setResult(s, null));
-      } else {
-        await Promise.all(segs.map(async (s) => setResult(s, await findOwn(s))));
+      await Promise.all(segs.map(async (s) => setResult(s, await findOwn(s))));
+      const missing = [];
+      for (const s of segs) {
+        if (s.confirmed || s.source) continue;
+        if (s.job.saved.has(s.num)) setResult(s, 'saved'); else missing.push(s);
       }
-      await Promise.all(segs.map(async (s) => {
-        if (s.confirmed || s.source) return;
-        if (s.job.saved.has(s.num)) setResult(s, 'saved');
-        else setResult(s, await findDonor(s));
-      }));
+      await Promise.all(missing.map(async (s) => setResult(s, await findDonor(s))));
     }
 
     // ------------------------------------------------------------ reporting
@@ -633,7 +634,7 @@
     // quality the player is actually downloading segments from.
     const jobs = [];
     let currentJob = null;
-    const isCurrent = (job) => (currentJob || jobs[jobs.length - 1]) === job;
+    const isCurrent = (job) => !job.auto && (currentJob || jobs.filter((j) => !j.auto).pop()) === job;
 
     function noteActivity(url) {
       for (const job of jobs) {
@@ -774,9 +775,8 @@
       if (settings.saveMode !== 'whole') scheduleCompress(job);
     }
 
-    // Which quality to download for saving: the sound is the same from 480p
-    // up, and 160p/360p can have slightly worse sound, so take the smallest
-    // file that still has full-quality sound.
+    // Which quality to download for saving: the smallest file that still has
+    // full-quality sound (see donorDirs).
     function saveDirs(job) {
       const height = (d) => (d === 'chunked' ? 1e4 : parseInt(d, 10) || 0);
       const dirs = allDirs(job).filter((d) => d !== 'audio_only');
@@ -787,8 +787,8 @@
 
     // "Whole VOD" mode: save every muted part that can still be unmuted, not
     // just the ones played.
-    async function maybeSaveAll(job) {
-      if (!settings.saveAudio || settings.saveMode !== 'whole' || job.noSave) return;
+    async function maybeSaveAll(job, force) {
+      if (!settings.saveAudio || (!force && settings.saveMode !== 'whole') || job.noSave) return;
       if (!job.finished || job.saving || job.savedAll) return;
       const todo = job.segs.filter((s) => s.source && s.source !== 'saved' && !job.saved.has(s.num));
       if (!todo.length) { job.savedAll = true; compressJob(job); return; }
@@ -845,12 +845,19 @@
       return [];
     }
 
-    async function compressJob(job) {
-      const kbps = KBPS[settings.saveQuality];
-      if (!settings.saveAudio || job.noSave || !job.saved.size) return;
-      if (job.compressing) { job.compressAgain = true; return; }
-      job.compressing = true;
+    // One compression run at a time per VOD; a request during a run queues
+    // one more run (for segments saved meanwhile). Resolves when done.
+    function compressJob(job) {
+      if (!settings.saveAudio || job.noSave || !job.saved.size) return Promise.resolve();
+      if (job.compressPromise) { job.compressAgain = true; return job.compressPromise; }
       job.compressAgain = false;
+      job.compressPromise = runCompress(job).finally(() => { job.compressPromise = null; });
+      return job.compressPromise.then(() => (job.compressAgain ? compressJob(job) : undefined));
+    }
+
+    async function runCompress(job) {
+      const kbps = KBPS[settings.saveQuality];
+      job.compressing = true;
       let freed = 0;
       try {
         const nums = [...job.saved].sort((a, b) => a - b);
@@ -898,13 +905,75 @@
         job.compressing = false;
         scheduleResult(job);
       }
-      if (job.compressAgain) { compressJob(job); return; }
       // Compression may have made room to save the rest.
       if (job.limitReached && freed > 0) {
         job.limitReached = false;
         job.savedAll = false;
         maybeSaveAll(job);
       }
+    }
+
+    // ------------------------------------------------------------ auto-save
+    // Saves a VOD's muted parts without playing it (for the channels in the
+    // popup's auto-save list). Runs in a twitch.tv page, because that's where
+    // saved audio lives and where the viewer is logged in.
+    async function autoSave(vodId) {
+      const out = { vodId: String(vodId), ok: false };
+      let job = null;
+      try {
+        const headers = { 'Client-ID': 'kimne78kx3ncx6brgo4mv6wki5h1ko' };
+        // Subscriber-only VODs need the viewer's Twitch login, exactly like the
+        // player sends it. It only ever goes to Twitch.
+        const login = (scope.document.cookie.match(/(?:^|;\s*)auth-token=([^;]+)/) || [])[1];
+        if (login) headers.Authorization = 'OAuth ' + decodeURIComponent(login);
+        const gql = await realFetch.call(scope, 'https://gql.twitch.tv/gql', {
+          method: 'POST', headers,
+          body: JSON.stringify({
+            query: 'query($id: ID!) { videoPlaybackAccessToken(id: $id, params: {platform: "web", playerBackend: "mediaplayer", playerType: "site"}) { value signature } }',
+            variables: { id: String(vodId) },
+          }),
+        }).then((r) => r.json());
+        const tok = gql && gql.data && gql.data.videoPlaybackAccessToken;
+        if (!tok) throw new Error('Twitch did not give access to this VOD');
+        const masterUrl = `https://usher.ttvnw.net/vod/${vodId}.m3u8?sig=${tok.signature}` +
+          `&token=${encodeURIComponent(tok.value)}&allow_source=true&allow_audio_only=true&player_backend=mediaplayer`;
+        const mr = await realFetch.call(scope, masterUrl);
+        if (!mr.ok) {
+          throw new Error(mr.status === 403
+            ? 'subscriber-only: log in to Twitch with an account subscribed to this channel'
+            : `Twitch answered ${mr.status}`);
+        }
+        const master = await mr.text();
+        readMaster(master, masterUrl);
+        const first = master.split('\n').map((l) => l.trim()).find((l) => l && l[0] !== '#' && !l.includes('/audio_only/'));
+        if (!first) throw new Error('no video in this VOD');
+        const mediaUrl = new URL(first, masterUrl).href;
+        const text = await realFetch.call(scope, mediaUrl).then((r) => r.text());
+        out.muted = (text.match(/-muted\.ts/g) || []).length;
+        if (!out.muted) { out.ok = true; out.restorable = 0; out.saved = 0; return out; }
+
+        job = rewritePlaylist(text, mediaUrl, true).job;
+        out.vodKey = job.vodKey;
+        await job.checked;
+        await maybeSaveAll(job, true);
+        await compressJob(job);
+        out.restorable = job.segs.filter((s) => s.source).length;
+        out.saved = job.segs.filter((s) => job.saved.has(s.num)).length;
+        out.bytes = job.savedBytes;
+        out.limitReached = job.limitReached;
+        out.ok = true;
+        console.log(TAG, `auto-save: VOD ${vodId}: ${out.saved}/${out.restorable} restorable muted segments saved`);
+      } catch (e) {
+        out.error = (e && e.message) || String(e);
+        console.warn(TAG, `auto-save: VOD ${vodId}:`, out.error);
+      } finally {
+        // Forget it, so the next run starts fresh and memory is freed.
+        if (job) {
+          jobs.splice(jobs.indexOf(job), 1);
+          for (const s of job.segs) segments.delete(s.urls['.ts']);
+        }
+      }
+      return out;
     }
 
     // ------------------------------------------------------------ playlists
@@ -926,7 +995,7 @@
       for (const [vodBase, dirs] of byVod) renditions.set(vodBase, dirs);
     }
 
-    function rewritePlaylist(text, playlistUrl) {
+    function rewritePlaylist(text, playlistUrl, auto) {
       const clean = playlistUrl.split('?')[0];
       const base = clean.slice(0, clean.lastIndexOf('/') + 1);
       const vodBase = base.slice(0, base.lastIndexOf('/', base.length - 2) + 1);
@@ -969,7 +1038,8 @@
       const sibling = jobs.find((j) => j.vodKey === vodKey);
       if (sibling) Object.assign(job, { savedBytes: sibling.savedBytes, savedAt: sibling.savedAt, noSave: sibling.noSave });
       jobs.push(job);
-      checkAll(job);
+      job.auto = !!auto;
+      job.checked = checkAll(job);
       return { text: lines.join('\n'), job };
     }
 
@@ -1211,6 +1281,10 @@
       if (relay) relay.postMessage({ type: 'deleteSaved', vodKey }); // live player state
       await store.remove(vodKey);
     };
+    if (request.action === 'autosave') {
+      const auto = window.__vodUnmuterAuto;
+      return auto ? auto.save(request.vodId) : { vodId: request.vodId, ok: false, error: 'unavailable' };
+    }
     if (request.action === 'delete' && request.vodKey) await forget(request.vodKey);
     else if (request.action === 'deleteAll') for (const v of await store.list()) await forget(v.vod);
     let usage = null;

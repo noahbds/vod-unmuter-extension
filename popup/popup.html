@@ -99,6 +99,30 @@
     </select>
   </div>
 
+  <h2 class="split" data-needs="saveAudio">
+    <span>Auto-save channels</span>
+    <button type="button" id="checkNow">Check now</button>
+  </h2>
+  <p class="muted small" data-needs="saveAudio">
+    New VODs from these channels are saved without playing them, while Twitch
+    still has the sound. Checked every 20 minutes.
+  </p>
+  <form id="addChannel" class="add" data-needs="saveAudio">
+    <input id="channelInput" type="text" placeholder="Channel name"
+           autocomplete="off" spellcheck="false" aria-label="Channel to auto-save">
+    <button type="submit">Add</button>
+  </form>
+  <p id="channelError" class="error" hidden></p>
+  <div id="channels" class="saved" data-needs="saveAudio"></div>
+  <label class="row" data-needs="saveAudio">
+    <span>
+      <strong>Open a Twitch tab if needed</strong>
+      <small>When no Twitch tab is open, briefly open one in the background to save</small>
+    </span>
+    <input type="checkbox" id="autoOpenTab">
+  </label>
+  <p id="autoNote" class="muted small" hidden></p>
+
   <h2 class="split">
     <span>Saved audio</span>
     <button type="button" id="deleteAll" class="danger" hidden>Delete all</button>
