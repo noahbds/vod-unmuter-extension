@@ -1232,10 +1232,33 @@
   // 1) Hook the page itself (in case the player ever runs without a worker).
   installUnmuteHook(window);
 
-  // 2) Wrap Worker so the same hook runs first inside Twitch's player worker.
-  //    (The player binds `self.fetch` when it starts, so the hook must already
-  //    be in place: that's why it is prepended to the worker's code.)
+  // 2) Get the same hook to run first inside Twitch's player worker. (The
+  //    player binds `self.fetch` when it starts, so the hook must already be
+  //    in place: it is prepended to the worker's code.) Two ways, because
+  //    other extensions (ad blockers, etc.) also replace `Worker`, and
+  //    depending on which loads first, theirs can start the player without
+  //    going through ours:
+  //    a. when the player's code is put in a Blob (Twitch, and most
+  //       extensions, create the worker from a Blob): works whatever the
+  //       order of the extensions;
+  //    b. when a Worker is created from anything else.
   const hookSource = '(' + installUnmuteHook.toString() + ')(self);\n';
+  const MARK = '__vodUnmuterHooked';
+  const isPlayerWorkerCode = (text) => /amazon-ivs-wasmworker|wasmworker\.min/.test(text);
+
+  const OriginalBlob = window.Blob;
+  window.Blob = class extends OriginalBlob {
+    constructor(parts, options) {
+      try {
+        if (Array.isArray(parts) && parts.length && parts.every((p) => typeof p === 'string')) {
+          const text = parts.join('');
+          if (isPlayerWorkerCode(text) && !text.includes(MARK)) parts = [hookSource].concat(parts);
+        }
+      } catch (e) { /* leave it as it was */ }
+      super(parts, options);
+    }
+  };
+
   const OriginalWorker = window.Worker;
   window.Worker = class extends OriginalWorker {
     constructor(scriptURL, options) {
@@ -1248,12 +1271,14 @@
           if (src.startsWith('blob:')) {
             const xhr = new XMLHttpRequest();
             xhr.open('GET', src, false); // read the original blob's code
+            xhr.overrideMimeType('text/javascript'); // (else Firefox tries to parse it as XML)
             xhr.send();
-            code = hookSource + xhr.responseText;
+            // Already hooked by (a)? Then leave it alone.
+            code = xhr.responseText.includes(MARK) ? null : hookSource + xhr.responseText;
           } else {
             code = hookSource + 'importScripts(' + JSON.stringify(new URL(src, location.href).href) + ');';
           }
-          finalURL = URL.createObjectURL(new Blob([code], { type: 'text/javascript' }));
+          if (code) finalURL = URL.createObjectURL(new OriginalBlob([code], { type: 'text/javascript' }));
         }
       } catch (e) {
         console.warn('[VOD Unmuter] could not wrap worker, using the original', e);
