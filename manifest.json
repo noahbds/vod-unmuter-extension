@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Twitch VOD Unmuter",
   "version": "1.0.0",
-  "description": "Unmutes muted parts of Twitch VODs using the original audio Twitch still stores, and can save that audio so VODs stay unmuted after Twitch deletes it.",
+  "description": "Restores the sound in muted parts of Twitch VODs, and saves it so they stay unmuted after Twitch deletes the originals.",
   "icons": {
     "16": "icons/icon-16.png",
     "32": "icons/icon-32.png",

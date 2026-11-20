@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+  <!-- VOD Unmuter logo, simplified for 16 px and 32 px (original artwork). -->
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#a970ff"/>
+      <stop offset="1" stop-color="#6420d6"/>
+    </linearGradient>
+  </defs>
+  <rect x="1" y="1" width="30" height="30" rx="7.5" fill="url(#bg)"/>
+  <path d="M6 12.5 h3.5 l5 -4.5 v16 l-5 -4.5 h-3.5 z" fill="#fff" stroke="#fff" stroke-width="1.5" stroke-linejoin="round"/>
+  <path d="M18.5 12 a5.5 5.5 0 0 1 0 8" fill="none" stroke="#fff" stroke-width="2.4" stroke-linecap="round"/>
+  <circle cx="24" cy="24" r="6.2" fill="#22c55e" stroke="#5b1fc4" stroke-width="1.4"/>
+  <path d="M21.4 24.1 l1.8 1.8 l3.6 -3.9" fill="none" stroke="#fff" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

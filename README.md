@@ -395,5 +395,7 @@ src/ui.js              Counter, panel, seek bar colors, hover details
 src/bridge.js          Passes settings, popup and auto-save requests to the page
 src/background.js      Auto-save timer: finds recent VODs, picks a Twitch tab
 popup/                 Settings and saved-audio manager
-icons/                 Extension icons
+icons/                 Extension icons (16, 32, 48, 128 px)
+art/                   Logo sources (SVG), 512 px logo, store images (1280x800,
+                       440x280); original-*: alternative logo without Twitch's shape
 ```

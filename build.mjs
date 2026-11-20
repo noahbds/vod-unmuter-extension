@@ -126,6 +126,11 @@ function zip(dir, names, outFile) {
 }
 
 // ---------------------------------------------------------------- checks
+if (base.description.length > 132) { // Chrome Web Store limit
+  console.error(`manifest.json: description is ${base.description.length} characters; the Chrome Web Store allows 132.`);
+  process.exit(1);
+}
+
 // Chrome refuses to load the extension if a script isn't strict UTF-8, which
 // includes Unicode "non-characters" such as U+FFFF (Firefox accepts them).
 // Write them as escapes ('￿') in the source instead.

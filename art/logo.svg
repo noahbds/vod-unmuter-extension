@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">
+  <!-- VOD Unmuter logo: a Twitch-style speech bubble with the sound coming
+       back (speaker + waves). Used for 48 px, 128 px and store images. -->
+  <!-- bubble: cut top-left corner, diagonal bottom-right, tail bottom-left -->
+  <path d="M27 6 H119 V76 L89 106 H68 L51 123 V106 H13 V20 Z" fill="#9146ff"/>
+  <!-- screen -->
+  <path d="M29 20 H105 V70 L87 88 H64 L51 101 V88 H29 Z" fill="#fff"/>
+  <!-- speaker -->
+  <path d="M38 44 h9 l13 -11 v39 l-13 -11 h-9 a2 2 0 0 1 -2 -2 v-13 a2 2 0 0 1 2 -2 z"
+        fill="#9146ff" stroke="#9146ff" stroke-width="4" stroke-linejoin="round"/>
+  <!-- sound coming back -->
+  <path d="M70 43 a14 14 0 0 1 0 19" fill="none" stroke="#9146ff" stroke-width="7" stroke-linecap="round"/>
+  <path d="M80 35 a26 26 0 0 1 0 35" fill="none" stroke="#9146ff" stroke-width="7" stroke-linecap="round"/>
+</svg>
