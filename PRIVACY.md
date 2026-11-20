@@ -14,6 +14,8 @@ analytics, ads or tracking.**
 |---|---|---|
 | **Twitch video files** of the VODs you open (playlists and 10-second video segments) | To find and play the original, unmuted audio | Downloaded from Twitch's servers, like the Twitch player does |
 | **Saved audio** of muted parts | So a VOD stays unmuted after Twitch deletes the originals (about a day after the stream) | Stored only in your browser, in twitch.tv's local storage (IndexedDB). Never uploaded |
+| **List of deleted Twitch files** (VOD folder name and the numbers of segments Twitch no longer has) | So opening the same VOD again doesn't re-check files that can't come back | Stored only in your browser, in twitch.tv's local storage (IndexedDB). Never uploaded. Removed after 90 days |
+| **Backup files** of saved audio | Only when you click *Download backup*, to keep a copy or move it to another browser | Saved by your browser to your downloads folder. The extension never uploads them; importing reads the file you pick, locally |
 | **Your Twitch login token** (the `auth-token` cookie Twitch sets when you log in) | Only for auto-save of subscriber-only VODs: to ask Twitch for access to a VOD, exactly as the Twitch player does | Read inside the twitch.tv page and sent only to Twitch (`gql.twitch.tv`). Never stored or sent anywhere else |
 | **Your settings** and **auto-save channel list** | To remember your choices | Your browser's extension storage. If you use your browser's sync feature, your browser syncs them to your own account |
 | **Auto-save status** (which recent VODs were checked and how much was saved) | To show the status in the extension's menu | Your browser's extension storage, on this device only |
@@ -44,6 +46,10 @@ The extension only contacts Twitch:
   clear twitch.tv's site data in your browser. Saved audio is also deleted
   automatically after the period you choose (60 days by default) and when the
   storage limit is reached.
+- **List of deleted Twitch files:** removed automatically after 90 days, or
+  by clearing twitch.tv's site data.
+- **Backup files:** they are ordinary files in your downloads; delete them
+  like any other file.
 - **Everything:** uninstall the extension and clear twitch.tv's site data.
 
 ## Contact

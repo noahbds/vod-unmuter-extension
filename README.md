@@ -46,8 +46,8 @@ This creates, in `dist/`:
 |---|---|
 | `dist/chrome/` | Chrome, Edge, Brave, Opera: *Load unpacked* |
 | `dist/firefox/` | Firefox: *Load Temporary Add-on* |
-| `twitch-vod-unmuter-chrome-1.0.0.zip` | Upload to the Chrome Web Store |
-| `twitch-vod-unmuter-firefox-1.0.0.zip` | Upload to addons.mozilla.org (signing) |
+| `twitch-vod-unmuter-chrome-1.1.0.zip` | Upload to the Chrome Web Store |
+| `twitch-vod-unmuter-firefox-1.1.0.zip` | Upload to addons.mozilla.org (signing) |
 
 The two builds differ only in `manifest.json` (Chrome runs the background
 script as a service worker, Firefox as a background page).
@@ -84,9 +84,19 @@ still be found.
 | You see | Meaning |
 |---|---|
 | ⟳ `34%` | Checking the muted parts (the video already plays meanwhile) |
+| 🔇 `34%` (red) | Still checking, but a sample spread over the whole VOD found nothing: the sound looks deleted in every quality |
 | 🔊 `182 / 182` (green) | Every muted part is unmuted |
 | 🔊 `150 / 182` (yellow) | Some parts can't be unmuted any more |
 | 🔇 `0 / 182` (red) | Twitch deleted the sound of every muted part |
+
+While checking, hovering the counter shows the progress, an **early
+estimate** (from 24 segments spread over the VOD, ready in a few seconds) and,
+for streams that ended more than 32 hours ago, a reminder that Twitch has
+usually deleted the originals by then.
+
+Opening a VOD again is much faster: files Twitch already deleted are
+remembered and not checked again (a VOD with 1,026 muted segments, all
+deleted: 85 s the first time, 2 s the next).
 
 Hover the counter (or click it to keep it open) for:
 - the quality you're watching and how many parts were unmuted,
@@ -199,10 +209,26 @@ on this computer only.
 - In the **player**: hover the counter → *Saved on this computer* → *Delete
   saved audio for this VOD*. *Save it again* undoes that during the session.
 - In the **popup**: the list of saved VODs (channel, stream date, size), with
-  ✕ to delete one and **Delete all**. The popup needs an open Twitch tab,
+  ✕ to delete one, **Delete all**, and **Back up…** (see below). The popup needs an open Twitch tab,
   because the audio lives in twitch.tv's storage.
 - Saves older than your **Delete saved audio after** setting are removed
   automatically.
+
+### Backup and moving to another browser
+
+Saved audio exists only in this browser, and it's the only copy left once
+Twitch deletes the originals. **Back up…** in the popup opens a page on
+twitch.tv where you can:
+
+- **Export:** pick VODs and download them as one `.vodunmuter` file (same size
+  as in storage, e.g. 31 MB for 253 segments).
+- **Import:** load a `.vodunmuter` file, in this browser or another one
+  (Chrome ↔ Firefox works). Segments already saved are kept as they are.
+  Imported VODs count as saved on the import day for *Delete saved audio
+  after*. VODs open in other tabs use the imported sound right away.
+
+The page is `https://www.twitch.tv/robots.txt#vod-unmuter-backup`: it has to be
+on twitch.tv because that's where the audio is stored.
 
 ---
 
@@ -264,7 +290,12 @@ Technical notes:
 - Every muted segment is checked individually. Twitch deletes originals in a
   scattered way, with holes inside kept stretches and survivors inside deleted
   ones, so guessing from a few segments was measurably wrong (up to 17% of
-  recoverable segments missed on one VOD).
+  recoverable segments missed on one VOD). 24 segments spread over the VOD
+  are checked first, only to show an early estimate; the rest follow in
+  playback order, 24 requests at a time.
+- Files Twitch answered "not found" for are remembered per VOD (a separate
+  `vod-unmuter-gone` database, segment numbers only, kept 90 days): a deleted
+  original never comes back, so they're never checked twice.
 - The audio splice works on the MPEG-TS packets directly (PAT/PMT, audio PID,
   continuity counters, timestamps). Audio is placed after the stream table so
   players recognize it from the first packet. It checks that the audio starts
@@ -376,7 +407,12 @@ turn that setting on.
 **Saved audio disappeared**
 It's deleted along with twitch.tv's site data (clearing cookies / browsing
 data, some privacy extensions or cleaners), and after the *Delete saved audio
-after* delay.
+after* delay. Use **Back up…** in the popup to keep a copy in a file.
+
+**Checking takes a long time**
+The first visit checks every muted segment in every quality: about a minute
+for 1,000 muted segments. Hover the counter: after a few seconds it already
+gives an estimate. The next visit to the same VOD is nearly instant.
 
 **Something looks broken after a Twitch update**
 Open the console (F12) and look for messages starting with `[VOD Unmuter]`. If

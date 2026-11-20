@@ -36,6 +36,133 @@
     return el;
   }
 
+  // ------------------------------------------------------------ backup page
+  // The popup opens https://www.twitch.tv/robots.txt#vod-unmuter-backup: saved
+  // audio lives in twitch.tv's storage, so export and import happen on a
+  // twitch.tv page (a popup also can't keep a file picker open in Firefox).
+  if (location.hostname === 'www.twitch.tv' && location.pathname === '/robots.txt' &&
+      location.hash === '#vod-unmuter-backup' && window === window.top) {
+    const start = () => renderBackupPage().catch((e) => { document.body.textContent = String(e); });
+    if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start); else start();
+    return;
+  }
+
+  async function renderBackupPage() {
+    const store = window.__vodUnmuterStore;
+    document.title = 'Back up saved audio · Twitch VOD Unmuter';
+    const css = h('style', null, `
+      html, body { margin: 0; background: #0e0e10; color: #efeff1; font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+      main { max-width: 640px; margin: 0 auto; padding: 32px 16px 64px; }
+      h1 { font-size: 24px; margin: 0 0 4px; } h2 { font-size: 18px; margin: 32px 0 8px; }
+      p { margin: 6px 0; } .muted { color: #adadb8; } .bad { color: #f87171; } .ok { color: #22c55e; }
+      .card { background: #18181b; border: 1px solid #2f2f35; border-radius: 8px; padding: 16px; }
+      label.vod { display: flex; gap: 10px; align-items: flex-start; padding: 6px 0; border-bottom: 1px solid #26262c; }
+      label.vod:last-of-type { border-bottom: 0; } label.vod small { display: block; color: #adadb8; }
+      button { background: #9146ff; color: #fff; border: 0; border-radius: 6px; padding: 8px 14px; font: inherit; font-weight: 600; cursor: pointer; }
+      button:disabled { opacity: .5; cursor: default; } button.quiet { background: #2f2f35; }
+      .actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; align-items: center; }
+      input[type=file] { color: #adadb8; max-width: 100%; }
+    `);
+    const mbText = (b) => `${(b / 1e6).toFixed(b < 1e7 ? 1 : 0)} MB`;
+    const dayText = (t) => (t ? new Date(t).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' }) : '?');
+    const main = h('main');
+    document.documentElement.replaceChildren(h('head', null, h('meta', { name: 'viewport', content: 'width=device-width, initial-scale=1' }), css), h('body', null, main));
+    document.title = 'Back up saved audio · Twitch VOD Unmuter';
+
+    main.append(h('h1', null, 'Back up saved audio'),
+      h('p', { class: 'muted' }, 'Saved audio is kept only in this browser. Download a backup file to keep it safe, ' +
+        'or to move it to another browser or computer and import it there.'));
+    if (!store || !store.exportSaved) {
+      main.append(h('p', { class: 'bad' }, 'The extension is not running on this page. Reload it and try again.'));
+      return;
+    }
+
+    // Export
+    const exportBox = h('div', { class: 'card' });
+    main.append(h('h2', null, 'Export'), exportBox);
+    const exportStatus = h('span', { class: 'muted' });
+    async function drawExport() {
+      exportBox.replaceChildren();
+      const vods = (await store.list()).sort((a, b) => b.savedAt - a.savedAt);
+      if (!vods.length) { exportBox.append(h('p', { class: 'muted' }, 'Nothing saved yet.')); return; }
+      const boxes = vods.map((v) => {
+        const cb = h('input', { type: 'checkbox', 'data-vod': v.vod });
+        cb.checked = true;
+        exportBox.append(h('label', { class: 'vod' }, cb, h('span', null,
+          h('b', null, v.channel || 'Unknown channel'), ` · streamed ${dayText(v.streamedAt)}`,
+          h('small', null, `${v.segments} segments · ${mbText(v.bytes)}`))));
+        return cb;
+      });
+      const button = h('button', {
+        onclick: async () => {
+          const picked = boxes.filter((b) => b.checked).map((b) => b.getAttribute('data-vod'));
+          if (!picked.length) { exportStatus.textContent = 'Pick at least one VOD.'; return; }
+          button.disabled = true;
+          exportStatus.textContent = 'Preparing the file…';
+          try {
+            const out = await store.exportSaved(picked);
+            const a = h('a', { href: URL.createObjectURL(out.blob), download: `vod-unmuter-backup-${new Date().toISOString().slice(0, 10)}.vodunmuter` });
+            document.body.append(a);
+            a.click();
+            a.remove();
+            setTimeout(() => URL.revokeObjectURL(a.href), 60000);
+            exportStatus.textContent = `Downloaded: ${out.vods} VOD${out.vods > 1 ? 's' : ''}, ${out.segments} segments, ${mbText(out.bytes)}.`;
+          } catch (e) {
+            exportStatus.textContent = 'Export failed: ' + ((e && e.message) || e);
+          }
+          button.disabled = false;
+        },
+      }, 'Download backup');
+      exportBox.append(h('div', { class: 'actions' }, button, exportStatus));
+    }
+
+    // Import
+    const file = h('input', { type: 'file', accept: '.vodunmuter' });
+    const importInfo = h('p', { class: 'muted' }, 'Pick a .vodunmuter file made by Export.');
+    const importButton = h('button', { disabled: '' }, 'Import');
+    const importStatus = h('span', { class: 'muted' });
+    main.append(h('h2', null, 'Import'), h('div', { class: 'card' }, file, importInfo,
+      h('p', { class: 'muted' }, 'Segments already saved in this browser are kept as they are. For the ' +
+        '"Keep saved audio" setting, imported VODs count as saved today.'),
+      h('div', { class: 'actions' }, importButton, importStatus)));
+    file.addEventListener('change', async () => {
+      importButton.disabled = true;
+      importStatus.textContent = '';
+      importInfo.className = 'muted';
+      const f = file.files && file.files[0];
+      if (!f) return;
+      try {
+        const { head } = await store.readBackupHeader(f);
+        const names = [...new Set(head.vods.map((v) => v.channel || 'unknown'))].join(', ');
+        importInfo.textContent = `${head.vods.length} VOD${head.vods.length > 1 ? 's' : ''} (${names}), ` +
+          `${head.audio.length} segments, ${mbText(f.size)}. Exported ${dayText(head.exported)}.`;
+        importButton.disabled = false;
+      } catch (e) {
+        importInfo.className = 'bad';
+        importInfo.textContent = (e && e.message) || String(e);
+      }
+    });
+    importButton.addEventListener('click', async () => {
+      const f = file.files && file.files[0];
+      if (!f) return;
+      importButton.disabled = true;
+      file.disabled = true;
+      try {
+        const out = await store.importSaved(f, (done, total) => { importStatus.textContent = `Importing… ${done} / ${total}`; });
+        importStatus.className = 'ok';
+        importStatus.textContent = `Imported ${out.added} segments (${mbText(out.bytes)}) for ${out.vods} VOD${out.vods === 1 ? '' : 's'}` +
+          (out.skipped ? `; ${out.skipped} were already here.` : '.') + ' Open VODs pick it up right away.';
+        drawExport();
+      } catch (e) {
+        importStatus.className = 'bad';
+        importStatus.textContent = 'Import failed: ' + ((e && e.message) || e);
+      }
+      file.disabled = false;
+    });
+
+    await drawExport();
+  }
+
   function speakerIcon(on) {
     const NS = 'http://www.w3.org/2000/svg';
     const svg = document.createElementNS(NS, 'svg');
@@ -197,6 +324,37 @@
   const tip = h('div', { class: 'vu-tip' });
   let badgeVersion = -1, barsVersion = -1;
 
+  function agoText(ms) {
+    const hours = ms / 36e5;
+    if (hours < 1) return 'less than an hour ago';
+    if (hours < 48) return `${Math.round(hours)} hours ago`;
+    return `${Math.round(hours / 24)} days ago`;
+  }
+
+  // Hover text of the counter while checking: progress, then an early
+  // verdict from the spread-out sample and from how old the stream is.
+  function checkingText(st, sample) {
+    const lines = [`Checking muted segments: ${st.done || 0} of ${st.muted} done` +
+      (st.found ? `, ${st.found} can be unmuted so far.` : '.')];
+    if (sample) {
+      if (!sample.found) {
+        lines.push(`None of ${sample.size} segments spread over the whole VOD can be unmuted: ` +
+          'the original sound looks deleted in every quality. Checking the rest to be sure…');
+      } else {
+        lines.push(`Early estimate: about ${Math.round((sample.found / sample.size) * 100)}% can be unmuted ` +
+          `(${sample.found} of ${sample.size} segments spread over the VOD).`);
+      }
+    }
+    if (st.endedAt) {
+      const since = Date.now() - st.endedAt;
+      if (since > (st.allGoneAfterH || 32) * 36e5) {
+        lines.push(`The stream ended ${agoText(since)}. Twitch usually deletes the original sound ` +
+          '13 to 32 hours after a stream, so only audio saved before then can still be restored.');
+      }
+    }
+    return lines.join('\n\n');
+  }
+
   function renderBadge() {
     if (badgeVersion === version) return;
     badgeVersion = version;
@@ -210,10 +368,11 @@
 
     if (state.type === 'checking') {
       const pct = Math.round(((state.done || 0) / state.muted) * 100);
-      const title = `Checking muted segments: ${state.done || 0} of ${state.muted} done` +
-        (state.found ? `, ${state.found} can be unmuted so far` : '');
-      badge.append(h('button', { class: 'vu-btn', title },
-        h('div', { class: 'vu-spin' }), `${pct}%`));
+      const sample = state.sample && state.sample.size && state.sample.done >= state.sample.size ? state.sample : null;
+      const looksGone = !!sample && !sample.found;
+      badge.append(h('button', { class: 'vu-btn' + (looksGone ? ' vu-gone' : ''), title: checkingText(state, sample) },
+        looksGone ? h('span', { class: 'vu-no-c' }, speakerIcon(false)) : h('div', { class: 'vu-spin' }),
+        `${pct}%`));
       return;
     }
 

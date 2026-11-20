@@ -219,6 +219,126 @@
       } catch (e) { return new Set(); }
     }
 
+    // ---- deleted originals ---------------------------------------------------
+    // Once Twitch deletes an original file it never comes back, so every
+    // "file not found" is remembered per VOD: opening the VOD again skips those
+    // checks and shows the result almost at once. Kept in a separate database
+    // so the saved-audio one never needs an upgrade.
+    //   gone: { vod, updated, files: { "<quality>/<suffix>": [segment numbers] } }
+    const GONE_KEEP_DAYS = 90;
+    let goneDbPromise = null;
+    function openGoneDb() {
+      if (!goneDbPromise) {
+        goneDbPromise = new Promise((resolve, reject) => {
+          const req = scope.indexedDB.open('vod-unmuter-gone', 1);
+          req.onupgradeneeded = () => req.result.createObjectStore('gone', { keyPath: 'vod' });
+          req.onsuccess = () => resolve(req.result);
+          req.onerror = () => reject(req.error);
+        }).catch(() => null);
+      }
+      return goneDbPromise;
+    }
+    async function goneTx(mode, work) {
+      const db = await openGoneDb();
+      if (!db) return null;
+      return new Promise((resolve, reject) => {
+        const tx = db.transaction('gone', mode);
+        const out = {};
+        work(tx.objectStore('gone'), out);
+        tx.oncomplete = () => resolve(out.value);
+        tx.onerror = tx.onabort = () => reject(tx.error);
+      });
+    }
+
+    const GONE_RE = /^([^/?]+)\/(\d+)(\.ts|-unmuted\.ts)(?:\?.*)?$/;
+    const goneQueue = new Map(); // vod folder -> { "<quality>/<suffix>" -> Set(numbers) }
+    let goneTimer = null;
+
+    // A file answered "not found": remember it (in memory and on disk).
+    function markMissing(url) {
+      known.set(url, false);
+      const job = jobs.find((j) => url.startsWith(j.vodBase));
+      if (!job) return;
+      const m = url.slice(job.vodBase.length).match(GONE_RE);
+      if (!m) return;
+      if (!goneQueue.has(job.vodKey)) goneQueue.set(job.vodKey, new Map());
+      const files = goneQueue.get(job.vodKey);
+      const k = m[1] + '/' + m[3];
+      if (!files.has(k)) files.set(k, new Set());
+      files.get(k).add(Number(m[2]));
+      if (!goneTimer) goneTimer = setTimeout(flushGone, 3000);
+    }
+
+    async function flushGone() {
+      clearTimeout(goneTimer);
+      goneTimer = null;
+      const batch = [...goneQueue];
+      goneQueue.clear();
+      if (!batch.length) return;
+      try {
+        await goneTx('readwrite', (store) => {
+          for (const [vod, files] of batch) {
+            const r = store.get(vod);
+            r.onsuccess = () => {
+              const rec = r.result || { vod, files: {} };
+              for (const [k, nums] of files) {
+                const all = new Set(rec.files[k] || []);
+                for (const n of nums) all.add(n);
+                rec.files[k] = [...all].sort((a, b) => a - b);
+              }
+              rec.updated = Date.now();
+              store.put(rec);
+            };
+          }
+        });
+      } catch (e) { /* only a speed-up: ignore */ }
+    }
+
+    // Marks this job's known-deleted files before checking starts.
+    async function loadGone(job) {
+      let rec = null;
+      try {
+        rec = await goneTx('readonly', (store, out) => {
+          const r = store.get(job.vodKey);
+          r.onsuccess = () => { out.value = r.result; };
+        });
+      } catch (e) { return 0; }
+      if (!rec || !rec.files) return 0;
+      let count = 0;
+      for (const [k, nums] of Object.entries(rec.files)) {
+        const slash = k.indexOf('/');
+        const dir = k.slice(0, slash), sfx = k.slice(slash + 1);
+        const set = new Set(nums);
+        for (const seg of job.segs) {
+          if (!set.has(seg.num)) continue;
+          known.set(job.vodBase + dir + '/' + seg.num + sfx + seg.query, false);
+          count++;
+        }
+      }
+      return count;
+    }
+
+    async function clearGone(vod) {
+      try {
+        await goneTx('readwrite', (store) => { if (vod) store.delete(vod); else store.clear(); });
+      } catch (e) { /* ignore */ }
+    }
+
+    async function expireGone() {
+      const limit = Date.now() - GONE_KEEP_DAYS * 864e5;
+      try {
+        await goneTx('readwrite', (store) => {
+          const r = store.openCursor();
+          r.onsuccess = () => {
+            const c = r.result;
+            if (!c) return;
+            if (!(c.value.updated > limit)) c.delete();
+            c.continue();
+          };
+        });
+      } catch (e) { /* ignore */ }
+    }
+
     // ---- compression ------------------------------------------------------
     // A saved segment is one of:
     //   { fmt: 'deflate', type, pts, data, packed }  audio packets, lossless
@@ -483,13 +603,138 @@
     }
 
     async function expireSaved(keepDays) {
+      expireGone();
       if (!keepDays) return; // 0 = keep forever
       const limit = Date.now() - keepDays * 864e5;
       for (const v of await listSaved()) if (v.savedAt < limit) await deleteSavedVod(v.vod);
     }
 
+    // ---- backup files ------------------------------------------------------
+    // One file holds any number of saved VODs:
+    //   "VODUNMUTER-BACKUP\n"  then a 4-byte little-endian header length,
+    //   the header (JSON), then the raw audio bytes the header points to.
+    // Binary fields of a record are written as { $bin: [offset, length] }.
+    const BACKUP_MAGIC = 'VODUNMUTER-BACKUP\n';
+    const BACKUP_FORMAT = 1;
+    const AUDIO_KEY_RE = /^([A-Za-z0-9_-]+)\|(\d+)$/;
+
+    async function exportSaved(vodKeys) {
+      const vods = (await listSaved()).filter((v) => !vodKeys || vodKeys.includes(v.vod));
+      const header = { format: BACKUP_FORMAT, app: 'Twitch VOD Unmuter', exported: Date.now(), vods, audio: [] };
+      const blobs = [];
+      let offset = 0;
+      for (const v of vods) {
+        const { keys, values } = (await idb('audio', 'readonly', (audio, out) => {
+          const k = audio.getAllKeys(audioRange(v.vod));
+          const r = audio.getAll(audioRange(v.vod));
+          r.onsuccess = () => { out.value = { keys: k.result, values: r.result }; };
+        })) || { keys: [], values: [] };
+        const parts = [];
+        keys.forEach((key, i) => {
+          const rec = {};
+          for (const [name, value] of Object.entries(values[i] || {})) {
+            if (value instanceof Uint8Array || value instanceof ArrayBuffer) {
+              const bytes = value instanceof Uint8Array ? value : new Uint8Array(value);
+              rec[name] = { $bin: [offset, bytes.byteLength] };
+              parts.push(bytes);
+              offset += bytes.byteLength;
+            } else rec[name] = value;
+          }
+          header.audio.push({ key, rec });
+        });
+        blobs.push(new Blob(parts)); // one VOD at a time, so the browser can keep it on disk
+      }
+      const head = new TextEncoder().encode(JSON.stringify(header));
+      const len = new Uint8Array(4);
+      new DataView(len.buffer).setUint32(0, head.byteLength, true);
+      const blob = new Blob([BACKUP_MAGIC, len, head].concat(blobs), { type: 'application/octet-stream' });
+      return { blob, vods: vods.length, segments: header.audio.length, bytes: offset };
+    }
+
+    async function readBackupHeader(file) {
+      const magicLen = BACKUP_MAGIC.length;
+      const start = new Uint8Array(await file.slice(0, magicLen + 4).arrayBuffer());
+      if (new TextDecoder().decode(start.subarray(0, magicLen)) !== BACKUP_MAGIC) throw new Error('This is not a VOD Unmuter backup file.');
+      const headLen = new DataView(start.buffer).getUint32(magicLen, true);
+      const head = JSON.parse(new TextDecoder().decode(await file.slice(magicLen + 4, magicLen + 4 + headLen).arrayBuffer()));
+      if (!head || head.format !== BACKUP_FORMAT || !Array.isArray(head.vods) || !Array.isArray(head.audio)) {
+        throw new Error('This backup was made by a newer version of the extension, or is damaged.');
+      }
+      return { head, dataStart: magicLen + 4 + headLen };
+    }
+
+    // Adds what is in the file. Segments already saved here are kept as they are.
+    async function importSaved(file, onProgress) {
+      const { head, dataStart } = await readBackupHeader(file);
+      const vodMeta = new Map(head.vods.filter((v) => v && typeof v.vod === 'string').map((v) => [v.vod, v]));
+      const result = { vods: new Set(), added: 0, skipped: 0, bytes: 0 };
+      const BATCH = 40;
+      for (let i = 0; i < head.audio.length; i += BATCH) {
+        // Read the bytes first: an IndexedDB transaction can't wait for file reads.
+        const batch = [];
+        for (const entry of head.audio.slice(i, i + BATCH)) {
+          const m = entry && typeof entry.key === 'string' && entry.key.match(AUDIO_KEY_RE);
+          if (!m || !entry.rec || typeof entry.rec !== 'object') { result.skipped++; continue; }
+          const rec = {};
+          for (const [name, value] of Object.entries(entry.rec)) {
+            if (value && Array.isArray(value.$bin)) {
+              const [off, len] = value.$bin;
+              rec[name] = new Uint8Array(await file.slice(dataStart + off, dataStart + off + len).arrayBuffer());
+              if (rec[name].byteLength !== len) throw new Error('The backup file is incomplete.');
+            } else rec[name] = value;
+          }
+          if (!(rec.data instanceof Uint8Array || rec.packets instanceof Uint8Array)) { result.skipped++; continue; }
+          batch.push({ key: entry.key, vod: m[1], rec });
+        }
+        await idb(['audio', 'vods'], 'readwrite', (audio, vods) => {
+          const totals = new Map(); // vod -> { segments, bytes } added in this batch
+          let pendingChecks = batch.length;
+          const finish = () => {
+            for (const [vod, add] of totals) {
+              const r = vods.get(vod);
+              r.onsuccess = () => {
+                const meta = vodMeta.get(vod) || {};
+                const info = r.result || Object.assign(vodInfo(vod), {
+                  channel: meta.channel || vodInfo(vod).channel, streamedAt: meta.streamedAt || vodInfo(vod).streamedAt,
+                  vod, savedAt: Date.now(), segments: 0, bytes: 0, // "saved" = imported now, so it isn't expired at once
+                });
+                info.segments += add.segments;
+                info.bytes += add.bytes;
+                vods.put(info);
+              };
+            }
+          };
+          if (!pendingChecks) return;
+          for (const item of batch) {
+            const k = audio.getKey(item.key);
+            k.onsuccess = () => {
+              if (k.result === undefined) {
+                audio.put(item.rec, item.key);
+                if (!totals.has(item.vod)) totals.set(item.vod, { segments: 0, bytes: 0 });
+                const t = totals.get(item.vod);
+                t.segments++;
+                t.bytes += recBytes(item.rec);
+                result.added++;
+                result.bytes += recBytes(item.rec);
+              } else result.skipped++;
+              result.vods.add(item.vod);
+              if (--pendingChecks === 0) finish();
+            };
+          }
+        });
+        if (onProgress) onProgress(Math.min(i + BATCH, head.audio.length), head.audio.length);
+      }
+      for (const vod of result.vods) post({ type: 'savedChanged', vodKey: vod });
+      return { vods: result.vods.size, added: result.added, skipped: result.skipped, bytes: result.bytes };
+    }
+
     // Only the page instance manages the database for the popup / UI.
-    if (IS_PAGE) scope.__vodUnmuterStore = { list: listSaved, remove: deleteSavedVod, expire: expireSaved };
+    if (IS_PAGE) {
+      scope.__vodUnmuterStore = {
+        list: listSaved, remove: deleteSavedVod, expire: expireSaved,
+        exportSaved, importSaved, readBackupHeader, clearGone,
+      };
+    }
     if (IS_PAGE) scope.__vodUnmuterAuto = { save: (vodId) => autoSave(vodId) };
 
     // ------------------------------------------------------------ probing
@@ -521,7 +766,7 @@
           const r = await realFetch.call(scope, url, { cache: 'no-store', signal: ctrl.signal });
           ctrl.abort(); // never download the body, found or not
           if (r.ok) { known.set(url, true); return true; }
-          if (isMiss(r.status)) { known.set(url, false); return false; }
+          if (isMiss(r.status)) { markMissing(url); return false; }
         } catch (e) { ctrl.abort(); /* network hiccup: retry */ }
         await sleep(300 * (attempt + 1));
       }
@@ -678,7 +923,11 @@
     function sendState(job) {
       if (job.finished) sendResult(job);
       else if (isCurrent(job)) {
-        post({ type: 'checking', key: job.key, vod: job.vod, quality: prettyQuality(job.dir), muted: job.segs.length, done: job.done, found: job.found });
+        post({
+          type: 'checking', key: job.key, vod: job.vod, quality: prettyQuality(job.dir),
+          muted: job.segs.length, done: job.done, found: job.found, sample: job.sample || null,
+          endedAt: job.endedAt || null, allGoneAfterH: ALL_GONE_AFTER_H,
+        });
       }
     }
 
@@ -692,24 +941,42 @@
       job.resultTimer = setTimeout(() => sendResult(job), 400);
     }
 
+    const SAMPLE_SIZE = 24;
+    // Twitch deletes original files 13 to 32 hours after the stream ends
+    // (measured on 81 VODs), so this is a hint for the early verdict.
+    const ALL_GONE_AFTER_H = 32;
+
     async function checkAll(job) {
       job.saved = await loadSavedNums(job.vodKey);
+      job.cachedGone = await loadGone(job);
+      const info = vodInfo(job.vodKey);
+      if (info.streamedAt) job.endedAt = info.streamedAt + job.total * 1000;
       sendState(job);
-      // Progress counts each segment as soon as it is settled, so long VODs
-      // (1000+ muted segments) show steady progress instead of sitting at 0%.
-      // Segments are taken in playback order by a small pool of workers, each
-      // finishing one segment before taking the next.
+
+      // A sample spread over the whole VOD is checked first, for an early
+      // verdict; then everything else in playback order. A small pool of
+      // workers each finishes one segment before taking the next.
+      const n = job.segs.length;
+      const sample = new Set();
+      for (let i = 0; i < Math.min(SAMPLE_SIZE, n); i++) sample.add(job.segs[Math.floor(((i + 0.5) * n) / Math.min(SAMPLE_SIZE, n))]);
+      const order = [...sample].concat(job.segs.filter((s) => !sample.has(s)));
+      job.sample = { size: sample.size, done: 0, found: 0 };
       let next = 0;
       const worker = async () => {
-        while (next < job.segs.length) {
-          const s = job.segs[next++];
+        while (next < order.length) {
+          const s = order[next++];
           try { await resolveSegment(s); } catch (e) { /* leave it muted */ }
           job.done++;
           if (s.source) job.found++;
+          if (sample.has(s)) {
+            job.sample.done++;
+            if (s.source) job.sample.found++;
+          }
           throttledProgress(job);
         }
       };
       await Promise.all(Array.from({ length: MAX_PARALLEL }, worker));
+      flushGone();
       job.finished = true;
       const restored = sendResult(job);
       console.log(`${TAG} [${prettyQuality(job.dir)}] ${restored}/${job.segs.length} muted segments can be unmuted` +
@@ -805,7 +1072,7 @@
             if (known.get(url) === false) continue;
             try {
               const r = await realFetch.call(scope, url, { cache: 'no-store' });
-              if (!r.ok) { if (isMiss(r.status)) known.set(url, false); continue; }
+              if (!r.ok) { if (isMiss(r.status)) markMissing(url); continue; }
               known.set(url, true);
               await saveFromBytes(seg, new Uint8Array(await r.arrayBuffer()));
               return;
@@ -1081,7 +1348,7 @@
             }
             return r;
           }
-          if (isMiss(r.status)) known.set(url, false);
+          if (isMiss(r.status)) markMissing(url);
           try { r.body && r.body.cancel(); } catch (e) { /* ignore */ }
         } catch (e) {
           if (aborted()) throw e;
@@ -1172,6 +1439,15 @@
             try { await deleteSavedVod(m.vodKey); } catch (e) { /* ignore */ }
           }
           for (const job of jobs) if (job.vodKey === m.vodKey && job.finished) sendResult(job);
+        } else if (m.type === 'savedChanged' && m.vodKey) {
+          // Audio was imported from a backup: use it for segments still muted.
+          for (const job of jobs) {
+            if (job.vodKey !== m.vodKey) continue;
+            job.saved = await loadSavedNums(job.vodKey);
+            job.savedAll = false;
+            for (const s of job.segs) if (!s.source && job.saved.has(s.num)) setResult(s, 'saved');
+            if (job.finished) scheduleResult(job);
+          }
         } else if (m.type === 'saveNow' && m.vodKey) {
           for (const job of jobs) {
             if (job.vodKey !== m.vodKey) continue;

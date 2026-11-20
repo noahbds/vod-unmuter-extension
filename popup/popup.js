@@ -124,6 +124,12 @@ $('deleteAll').addEventListener('click', async () => {
   render(await ask('deleteAll'));
 });
 
+// Export / import happen on a twitch.tv page, where the saved audio lives.
+$('backup').addEventListener('click', () => {
+  api.tabs.create({ url: 'https://www.twitch.tv/robots.txt#vod-unmuter-backup' });
+  window.close();
+});
+
 // ------------------------------------------------------------ auto-save
 const ago = (t) => {
   const m = Math.round((Date.now() - t) / 6e4);
