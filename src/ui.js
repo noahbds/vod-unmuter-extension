@@ -408,8 +408,8 @@
 
     if (tip.parentNode !== player) player.append(tip);
     const clientX = e.clientX;
-    // Twitch draws its preview image a moment later; place the box above it.
-    requestAnimationFrame(() => {
+    const place = () => {
+      if (!tip.parentNode) return;
       const pr = player.getBoundingClientRect();
       let top = br.top - 14;
       const preview = player.querySelector('[data-test-selector="vod-seekbar-preview-overlay-preview-image"]');
@@ -419,8 +419,14 @@
       const half = tip.offsetWidth / 2;
       tip.style.left = `${Math.min(Math.max(clientX - pr.left, half + 6), pr.width - half - 6)}px`;
       tip.style.top = `${Math.max(top - pr.top, tip.offsetHeight + 4)}px`;
-    });
+    };
+    // Twitch draws its preview image a moment later (sometimes after the
+    // mouse stopped moving): place the box now, and again once it's there.
+    requestAnimationFrame(place);
+    clearTimeout(tipTimers[0]); clearTimeout(tipTimers[1]);
+    tipTimers = [setTimeout(place, 150), setTimeout(place, 450)];
   }, true);
+  let tipTimers = [];
 
   // --------------------------------------------------------------- messaging
   const channel = new BroadcastChannel('vod-unmuter');

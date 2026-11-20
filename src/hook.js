@@ -858,6 +858,9 @@
     async function runCompress(job) {
       const kbps = KBPS[settings.saveQuality];
       job.compressing = true;
+      job.compressDone = 0;
+      job.compressTotal = job.saved.size;
+      scheduleResult(job); // show "Compressing…" right away, not after the first 10
       let freed = 0;
       try {
         const nums = [...job.saved].sort((a, b) => a - b);
