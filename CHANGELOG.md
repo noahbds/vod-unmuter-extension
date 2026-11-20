@@ -1,6 +1,19 @@
 # Changelog
 
-## 1.1.1
+## 1.2.0
+
+Faster:
+
+- **Old VODs are checked in seconds.** When a stream ended more than 36 hours
+  ago and none of the 24 sample segments still has its sound, the rest isn't
+  checked one by one (none of the 71 VODs we measured that old had any
+  original left). 205 muted segments: 24.5 s → 7.9 s. The counter's panel
+  says why, and any part you play is still checked.
+- **Checking is faster:** 48 requests at a time instead of 24 (270 muted
+  segments: 14 s → 10 s).
+- **Saving is more than twice as fast:** 8 downloads at a time instead of 3
+  (253 segments: 76 s → 32 s). This matters because Twitch deletes the
+  originals within a day.
 
 Bug fixes:
 

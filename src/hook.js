@@ -40,8 +40,8 @@
     const IS_PAGE = typeof scope.document !== 'undefined'; // vs. the player worker
     const SUFFIXES = ['.ts', '-unmuted.ts']; // where the original audio can live
     const MUTED_RE = /^(.*?)(\d+)-muted\.ts(\?.*)?$/;
-    const MAX_PARALLEL = 24;   // background checks (tiny requests, HTTP/2)
-    const SAVE_PARALLEL = 3;   // background downloads for saving
+    const MAX_PARALLEL = 48;   // background checks (tiny requests, HTTP/2; measured: 14 s -> 10 s)
+    const SAVE_PARALLEL = 8;    // background downloads for saving (measured: 76 s -> 32 s for 253)
     // Used only if the master playlist was not seen. Best quality first.
     const FALLBACK_DIRS = ['chunked', '1080p60', '1080p30', '720p60', '720p30', '480p30', '360p30', '160p30'];
 
@@ -922,6 +922,7 @@
           type: 'result', key: job.key, vod: job.vod, vodKey: job.vodKey,
           quality: prettyQuality(job.dir), total: job.total,
           muted: job.segs.length, restored, fromOther, fromSaved, mutedSeconds, restoredSeconds,
+          skipped: job.skipped || 0, endedAt: job.endedAt || null, sampleSize: job.sample ? job.sample.size : 0,
           ranges: buildRanges(job.segs),
           save: {
             enabled: !!settings.saveAudio, mode: settings.saveMode,
@@ -960,12 +961,17 @@
     // Twitch deletes original files 13 to 32 hours after the stream ends
     // (measured on 81 VODs), so this is a hint for the early verdict.
     const ALL_GONE_AFTER_H = 32;
+    // Past this, with nothing found in the sample, the rest isn't checked one
+    // by one: none of the 71 VODs we measured that ended more than 32 hours
+    // ago had any original left. A part that is played is still checked then.
+    const SKIP_REST_AFTER_H = 36;
 
     // A small pool of workers, each finishing one segment before taking the next.
     async function checkSegments(job, order, sample) {
       let next = 0;
       const worker = async () => {
         while (next < order.length) {
+          if (job.skipRest) break;
           const s = order[next++];
           try { await resolveSegment(s); } catch (e) { /* leave it muted */ }
           job.done++;
@@ -973,6 +979,8 @@
           if (sample && sample.has(s)) {
             job.sample.done++;
             if (s.source) job.sample.found++;
+            if (job.sample.done === job.sample.size && !job.sample.found &&
+                job.endedAt && Date.now() - job.endedAt > SKIP_REST_AFTER_H * 36e5) job.skipRest = true;
           }
           throttledProgress(job);
         }
@@ -1007,6 +1015,17 @@
       const order = [...sample].concat(job.segs.filter((s) => !sample.has(s)));
       job.sample = { size: sample.size, done: 0, found: 0 };
       await checkSegments(job, order, sample);
+      if (job.skipRest) {
+        // Old VOD, nothing left in the sample: only the saved copy counts.
+        let skipped = 0;
+        for (const s of job.segs) {
+          if (s.source !== undefined || s.confirmed) continue;
+          if (job.saved.has(s.num)) setResult(s, 'saved');
+          else { s.source = null; skipped++; }
+        }
+        job.skipped = skipped;
+        job.done = job.segs.length;
+      }
       job.finished = true;
       const restored = sendResult(job);
       console.log(`${TAG} [${prettyQuality(job.dir)}] ${restored}/${job.segs.length} muted segments can be unmuted` +

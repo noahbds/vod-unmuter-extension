@@ -289,6 +289,7 @@
     .vu-row { display: flex; align-items: center; gap: 8px; padding: 3px 0; font-variant-numeric: tabular-nums; }
     .vu-dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
     .vu-row .vu-len { margin-left: auto; color: #adadb8; }
+    .vu-note { color: #adadb8; font-size: 12px; line-height: 1.4; margin: 8px 0 2px; }
 
     .vu-tip {
       position: absolute; z-index: 2001; pointer-events: none;
@@ -398,6 +399,10 @@
           h('span', null, 'Audio restored'), h('span', null, `${span(state.restoredSeconds)} / ${span(state.mutedSeconds)}`)),
         h('div', { class: 'vu-meter', title: `${pct}% of the muted time restored` },
           h('div', { style: `width:${pct}%` })),
+        state.skipped ? h('div', { class: 'vu-note' },
+          `The stream ended ${agoText(Date.now() - state.endedAt)}, and none of ${state.sampleSize} segments ` +
+          'spread over the VOD still had its sound, so the others weren\'t checked one by one: Twitch deletes ' +
+          'the original sound 13 to 32 hours after a stream. Any part you play is still checked.') : null,
         savedSection(),
         h('div', { class: 'vu-list-title' }, 'Muted parts of this VOD'),
         state.ranges.map((r) => h('div', { class: 'vu-row' },

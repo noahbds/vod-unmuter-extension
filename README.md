@@ -46,8 +46,8 @@ This creates, in `dist/`:
 |---|---|
 | `dist/chrome/` | Chrome, Edge, Brave, Opera: *Load unpacked* |
 | `dist/firefox/` | Firefox: *Load Temporary Add-on* |
-| `twitch-vod-unmuter-chrome-1.1.1.zip` | Upload to the Chrome Web Store |
-| `twitch-vod-unmuter-firefox-1.1.1.zip` | Upload to addons.mozilla.org (signing) |
+| `twitch-vod-unmuter-chrome-1.2.0.zip` | Upload to the Chrome Web Store |
+| `twitch-vod-unmuter-firefox-1.2.0.zip` | Upload to addons.mozilla.org (signing) |
 
 The two builds differ only in `manifest.json` (Chrome runs the background
 script as a service worker, Firefox as a background page).
@@ -97,6 +97,12 @@ usually deleted the originals by then.
 Opening a VOD again is much faster: files Twitch already deleted are
 remembered and not checked again (a VOD with 1,026 muted segments, all
 deleted: 85 s the first time, 2 s the next).
+
+For a stream that ended **more than 36 hours ago**, if none of those 24
+segments has its sound left, the rest isn't checked one by one: none of the 71
+VODs we measured that old had any original left. It takes a few seconds
+instead of a minute or more (205 muted segments: 24.5 s → 7.9 s), and the
+panel says so. Any part you play is still checked at that moment.
 
 Hover the counter (or click it to keep it open) for:
 - the quality you're watching and how many parts were unmuted,
@@ -292,7 +298,8 @@ Technical notes:
   ones, so guessing from a few segments was measurably wrong (up to 17% of
   recoverable segments missed on one VOD). 24 segments spread over the VOD
   are checked first, only to show an early estimate; the rest follow in
-  playback order, 24 requests at a time.
+  playback order, 48 requests at a time. Saving downloads 8 files at a time
+  (253 segments saved in about 32 s instead of 76 s with 3).
 - Files Twitch answered "not found" for are remembered per VOD (a separate
   `vod-unmuter-gone` database, segment numbers only, kept 90 days): a deleted
   original never comes back, so they're never checked twice.
