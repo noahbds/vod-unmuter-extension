@@ -210,7 +210,9 @@
 
     if (state.type === 'checking') {
       const pct = Math.round(((state.done || 0) / state.muted) * 100);
-      badge.append(h('button', { class: 'vu-btn', title: `Checking ${state.muted} muted segments…` },
+      const title = `Checking muted segments: ${state.done || 0} of ${state.muted} done` +
+        (state.found ? `, ${state.found} can be unmuted so far` : '');
+      badge.append(h('button', { class: 'vu-btn', title },
         h('div', { class: 'vu-spin' }), `${pct}%`));
       return;
     }

@@ -40,7 +40,7 @@
     const IS_PAGE = typeof scope.document !== 'undefined'; // vs. the player worker
     const SUFFIXES = ['.ts', '-unmuted.ts']; // where the original audio can live
     const MUTED_RE = /^(.*?)(\d+)-muted\.ts(\?.*)?$/;
-    const MAX_PARALLEL = 12;   // background checks
+    const MAX_PARALLEL = 24;   // background checks (tiny requests, HTTP/2)
     const SAVE_PARALLEL = 3;   // background downloads for saving
     // Used only if the master playlist was not seen. Best quality first.
     const FALLBACK_DIRS = ['chunked', '1080p60', '1080p30', '720p60', '720p30', '480p30', '360p30', '160p30'];
@@ -519,7 +519,7 @@
         const ctrl = new AbortController();
         try {
           const r = await realFetch.call(scope, url, { cache: 'no-store', signal: ctrl.signal });
-          ctrl.abort();
+          ctrl.abort(); // never download the body, found or not
           if (r.ok) { known.set(url, true); return true; }
           if (isMiss(r.status)) { known.set(url, false); return false; }
         } catch (e) { ctrl.abort(); /* network hiccup: retry */ }
@@ -575,18 +575,15 @@
       if (!seg.confirmed) seg.source = source;
     }
 
-    // A run of consecutive muted segments. Every segment is checked: Twitch
-    // deletes originals in a scattered way (holes inside kept stretches and
-    // survivors inside deleted ones), so guessing from a few segments was
-    // wrong on real VODs. Order: same quality, saved copy, other qualities.
-    async function resolveRun(segs) {
-      await Promise.all(segs.map(async (s) => setResult(s, await findOwn(s))));
-      const missing = [];
-      for (const s of segs) {
-        if (s.confirmed || s.source) continue;
-        if (s.job.saved.has(s.num)) setResult(s, 'saved'); else missing.push(s);
-      }
-      await Promise.all(missing.map(async (s) => setResult(s, await findDonor(s))));
+    // Every muted segment is checked on its own: Twitch deletes originals in a
+    // scattered way (holes inside kept stretches and survivors inside deleted
+    // ones), so guessing from a few segments was wrong on real VODs.
+    // Order: same quality, saved copy, other qualities.
+    async function resolveSegment(s) {
+      setResult(s, await findOwn(s));
+      if (s.confirmed || s.source) return;
+      if (s.job.saved.has(s.num)) { setResult(s, 'saved'); return; }
+      setResult(s, await findDonor(s));
     }
 
     // ------------------------------------------------------------ reporting
@@ -681,7 +678,7 @@
     function sendState(job) {
       if (job.finished) sendResult(job);
       else if (isCurrent(job)) {
-        post({ type: 'checking', key: job.key, vod: job.vod, quality: prettyQuality(job.dir), muted: job.segs.length, done: job.done });
+        post({ type: 'checking', key: job.key, vod: job.vod, quality: prettyQuality(job.dir), muted: job.segs.length, done: job.done, found: job.found });
       }
     }
 
@@ -698,16 +695,21 @@
     async function checkAll(job) {
       job.saved = await loadSavedNums(job.vodKey);
       sendState(job);
-      const runs = [];
-      for (const s of job.segs) {
-        const run = runs[runs.length - 1];
-        if (run && run[run.length - 1].num + 1 === s.num) run.push(s); else runs.push([s]);
-      }
-      await Promise.all(runs.map(async (run) => {
-        await resolveRun(run);
-        job.done += run.length;
-        throttledProgress(job);
-      }));
+      // Progress counts each segment as soon as it is settled, so long VODs
+      // (1000+ muted segments) show steady progress instead of sitting at 0%.
+      // Segments are taken in playback order by a small pool of workers, each
+      // finishing one segment before taking the next.
+      let next = 0;
+      const worker = async () => {
+        while (next < job.segs.length) {
+          const s = job.segs[next++];
+          try { await resolveSegment(s); } catch (e) { /* leave it muted */ }
+          job.done++;
+          if (s.source) job.found++;
+          throttledProgress(job);
+        }
+      };
+      await Promise.all(Array.from({ length: MAX_PARALLEL }, worker));
       job.finished = true;
       const restored = sendResult(job);
       console.log(`${TAG} [${prettyQuality(job.dir)}] ${restored}/${job.segs.length} muted segments can be unmuted` +
@@ -1008,7 +1010,7 @@
         vod: vodBase,                                   // same for every quality
         vodKey,                                         // folder name, used for saving
         dir: base.slice(vodBase.length, -1),
-        base, vodBase, total: 0, segs: [], done: 0, finished: false,
+        base, vodBase, total: 0, segs: [], done: 0, found: 0, finished: false,
         saved: new Set(), savedBytes: 0, savedAt: null, saving: false, savedAll: false, noSave: false,
         limitReached: false, compressing: false, compressDone: 0, compressTotal: 0,
       };
