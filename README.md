@@ -46,8 +46,8 @@ This creates, in `dist/`:
 |---|---|
 | `dist/chrome/` | Chrome, Edge, Brave, Opera: *Load unpacked* |
 | `dist/firefox/` | Firefox: *Load Temporary Add-on* |
-| `twitch-vod-unmuter-chrome-1.1.0.zip` | Upload to the Chrome Web Store |
-| `twitch-vod-unmuter-firefox-1.1.0.zip` | Upload to addons.mozilla.org (signing) |
+| `twitch-vod-unmuter-chrome-1.1.1.zip` | Upload to the Chrome Web Store |
+| `twitch-vod-unmuter-firefox-1.1.1.zip` | Upload to addons.mozilla.org (signing) |
 
 The two builds differ only in `manifest.json` (Chrome runs the background
 script as a service worker, Firefox as a background page).

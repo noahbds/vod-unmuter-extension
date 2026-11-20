@@ -258,7 +258,7 @@
     function markMissing(url) {
       known.set(url, false);
       const job = jobs.find((j) => url.startsWith(j.vodBase));
-      if (!job) return;
+      if (!job || job.live) return;
       const m = url.slice(job.vodBase.length).match(GONE_RE);
       if (!m) return;
       if (!goneQueue.has(job.vodKey)) goneQueue.set(job.vodKey, new Map());
@@ -876,13 +876,28 @@
     // quality the player is actually downloading segments from.
     const jobs = [];
     let currentJob = null;
-    const isCurrent = (job) => !job.auto && (currentJob || jobs.filter((j) => !j.auto).pop()) === job;
+    let noneCurrent = false; // the player moved to a VOD with nothing muted
+    const isCurrent = (job) => !job.auto &&
+      (currentJob || (noneCurrent ? null : jobs.filter((j) => !j.auto).pop())) === job;
+
+    // The player opened another VOD (Twitch changes pages without reloading).
+    // `job` is that VOD's job, or null when it has nothing muted: tell the UI
+    // to drop the previous VOD's counter and seek bar colors.
+    function switchVod(vodBase, job) {
+      const before = currentJob || (noneCurrent ? null : jobs.filter((j) => !j.auto).pop());
+      if (!before || before.vodBase === vodBase) return;
+      post({ type: 'none', vod: before.vod });
+      currentJob = job;
+      noneCurrent = !job;
+      if (job) sendState(job);
+    }
 
     function noteActivity(url) {
       for (const job of jobs) {
         if (url.startsWith(job.base)) {
           if (currentJob !== job) {
             currentJob = job;
+            noneCurrent = false;
             sendState(job);
             maybeSaveAll(job);
           }
@@ -946,6 +961,36 @@
     // (measured on 81 VODs), so this is a hint for the early verdict.
     const ALL_GONE_AFTER_H = 32;
 
+    // A small pool of workers, each finishing one segment before taking the next.
+    async function checkSegments(job, order, sample) {
+      let next = 0;
+      const worker = async () => {
+        while (next < order.length) {
+          const s = order[next++];
+          try { await resolveSegment(s); } catch (e) { /* leave it muted */ }
+          job.done++;
+          if (s.source) job.found++;
+          if (sample && sample.has(s)) {
+            job.sample.done++;
+            if (s.source) job.sample.found++;
+          }
+          throttledProgress(job);
+        }
+      };
+      await Promise.all(Array.from({ length: MAX_PARALLEL }, worker));
+      flushGone();
+    }
+
+    // New muted segments in a VOD that is still recording.
+    async function checkMore(job, segs) {
+      await checkSegments(job, segs, null);
+      sendResult(job);
+      // Save the new ones too (or right after a save that is running now).
+      if (job.saving) job.saveAgain = true;
+      else job.savedAll = false;
+      if (isCurrent(job)) maybeSaveAll(job);
+    }
+
     async function checkAll(job) {
       job.saved = await loadSavedNums(job.vodKey);
       job.cachedGone = await loadGone(job);
@@ -961,22 +1006,7 @@
       for (let i = 0; i < Math.min(SAMPLE_SIZE, n); i++) sample.add(job.segs[Math.floor(((i + 0.5) * n) / Math.min(SAMPLE_SIZE, n))]);
       const order = [...sample].concat(job.segs.filter((s) => !sample.has(s)));
       job.sample = { size: sample.size, done: 0, found: 0 };
-      let next = 0;
-      const worker = async () => {
-        while (next < order.length) {
-          const s = order[next++];
-          try { await resolveSegment(s); } catch (e) { /* leave it muted */ }
-          job.done++;
-          if (s.source) job.found++;
-          if (sample.has(s)) {
-            job.sample.done++;
-            if (s.source) job.sample.found++;
-          }
-          throttledProgress(job);
-        }
-      };
-      await Promise.all(Array.from({ length: MAX_PARALLEL }, worker));
-      flushGone();
+      await checkSegments(job, order, sample);
       job.finished = true;
       const restored = sendResult(job);
       console.log(`${TAG} [${prettyQuality(job.dir)}] ${restored}/${job.segs.length} muted segments can be unmuted` +
@@ -1083,6 +1113,11 @@
       job.saving = false;
       job.savedAll = !job.limitReached;
       sendResult(job);
+      if (job.saveAgain && !job.limitReached) {
+        job.saveAgain = false;
+        job.savedAll = false;
+        return maybeSaveAll(job, force);
+      }
       compressJob(job);
     }
 
@@ -1267,12 +1302,14 @@
       for (const [vodBase, dirs] of byVod) renditions.set(vodBase, dirs);
     }
 
-    function rewritePlaylist(text, playlistUrl, auto) {
+    // `existing`: the job made from an earlier copy of this playlist. A VOD that
+    // is still recording keeps growing, so new muted segments are added to it.
+    function rewritePlaylist(text, playlistUrl, auto, existing) {
       const clean = playlistUrl.split('?')[0];
       const base = clean.slice(0, clean.lastIndexOf('/') + 1);
       const vodBase = base.slice(0, base.lastIndexOf('/', base.length - 2) + 1);
       const vodKey = vodBase.slice(vodBase.lastIndexOf('/', vodBase.length - 2) + 1, -1);
-      const job = {
+      const job = existing || {
         key: base,                                      // one per quality
         vod: vodBase,                                   // same for every quality
         vodKey,                                         // folder name, used for saving
@@ -1281,7 +1318,12 @@
         saved: new Set(), savedBytes: 0, savedAt: null, saving: false, savedAll: false, noSave: false,
         limitReached: false, compressing: false, compressDone: 0, compressTotal: 0,
       };
+      // Still recording: no end marker yet. Its newest files may not be in
+      // every quality yet, so "not found" isn't remembered for good.
+      job.live = !text.includes('#EXT-X-ENDLIST');
 
+      const have = new Map(job.segs.map((x) => [x.num, x]));
+      const added = [];
       const lines = text.split('\n');
       let time = 0;
       let duration = 0;
@@ -1291,28 +1333,43 @@
         if (!line || line[0] === '#') continue;
         const m = line.match(MUTED_RE);
         if (m) {
-          const at = (suffix) => new URL(m[1] + m[2] + suffix + (m[3] || ''), playlistUrl).href;
-          const seg = {
-            job, num: Number(m[2]), query: m[3] || '', start: time, duration,
-            urls: { '.ts': at('.ts'), '-unmuted.ts': at('-unmuted.ts'), muted: at('-muted.ts') },
-            source: undefined, confirmed: false,
-          };
-          job.segs.push(seg);
+          let seg = have.get(Number(m[2]));
+          if (seg) {
+            seg.start = time;
+            seg.duration = duration;
+          } else {
+            const at = (suffix) => new URL(m[1] + m[2] + suffix + (m[3] || ''), playlistUrl).href;
+            seg = {
+              job, num: Number(m[2]), query: m[3] || '', start: time, duration,
+              urls: { '.ts': at('.ts'), '-unmuted.ts': at('-unmuted.ts'), muted: at('-muted.ts') },
+              source: undefined, confirmed: false,
+            };
+            job.segs.push(seg);
+            added.push(seg);
+            segments.set(seg.urls['.ts'], seg);
+          }
           lines[i] = seg.urls['.ts'];
-          segments.set(seg.urls['.ts'], seg);
         }
         time += duration;
         duration = 0;
       }
       if (!job.segs.length) return null;
       job.total = time;
+      const out = { text: lines.join('\n'), raw: text, job };
+      if (existing) {
+        if (added.length) {
+          job.segs.sort((a, b) => a.num - b.num);
+          job.checked = Promise.resolve(job.checked).then(() => checkMore(job, added));
+        }
+        return out;
+      }
       // Another quality of this VOD may already know its saved size.
       const sibling = jobs.find((j) => j.vodKey === vodKey);
       if (sibling) Object.assign(job, { savedBytes: sibling.savedBytes, savedAt: sibling.savedAt, noSave: sibling.noSave });
       jobs.push(job);
       job.auto = !!auto;
       job.checked = checkAll(job);
-      return { text: lines.join('\n'), job };
+      return out;
     }
 
     // ------------------------------------------------------------ segments
@@ -1471,16 +1528,19 @@
       try {
         const playlistUrl = res.url || url;
         let entry = playlists.get(playlistUrl);
-        if (entry) {
-          sendState(entry.job);
-        } else {
-          const text = await res.clone().text();
-          if (text.includes('#EXT-X-STREAM-INF')) { readMaster(text, playlistUrl); return res; }
-          if (!text.includes('-muted.ts')) return res;
-          entry = rewritePlaylist(text, playlistUrl);
+        const text = await res.clone().text();
+        if (text.includes('#EXT-X-STREAM-INF')) { readMaster(text, playlistUrl); return res; }
+        const clean = playlistUrl.split('?')[0];
+        const vodBase = clean.slice(0, clean.lastIndexOf('/', clean.lastIndexOf('/') - 1) + 1);
+        if (!text.includes('-muted.ts')) { switchVod(vodBase, null); return res; }
+        if (!entry || entry.raw !== text) {
+          // New, or Twitch's copy changed (a VOD still recording grows).
+          entry = rewritePlaylist(text, playlistUrl, false, entry && entry.job);
           if (!entry) return res;
           playlists.set(playlistUrl, entry);
         }
+        switchVod(vodBase, entry.job);
+        sendState(entry.job);
         const out = new Response(entry.text, {
           status: res.status,
           statusText: res.statusText,

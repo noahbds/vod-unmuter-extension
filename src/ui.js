@@ -601,6 +601,10 @@
       state = m; version++;
     } else if (m.type === 'result') {
       state = m; version++;
+    } else if (m.type === 'none') {
+      // The player moved on from that VOD.
+      if (!state || state.vod !== m.vod) return;
+      state = null; version++;
     } else return;
     update();
   });

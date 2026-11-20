@@ -17,6 +17,7 @@ const EVERY_MINUTES = 20;
 const WINDOW_HOURS = 36;      // after this, Twitch has deleted the originals
 const RETRY_MINUTES = 15;     // don't redo a VOD more often than this
 const BUSY_MINUTES = 45;      // safety: forget a run that never reported back
+const MUTE_LATE_HOURS = 12;   // keep checking unmuted VODs this long after the stream
 const DEFAULTS = { saveAudio: true, autoChannels: [], autoOpenTab: true };
 const EMPTY_STATE = { vods: {}, channels: {}, lastRun: null, note: '' };
 
@@ -188,7 +189,10 @@ function recordResult(result) {
     });
     // Done once the stream is over and everything still on Twitch is saved
     // (originals only ever disappear, so there's nothing more to get later).
-    if (result.ok && !rec.live && rec.saved >= rec.restorable) rec.done = true;
+    // Nothing muted yet: Twitch may still mute parts in the hours after the
+    // stream, so keep looking for a while (one small playlist request).
+    const justEnded = rec.endedAt && Date.now() - rec.endedAt < MUTE_LATE_HOURS * 36e5;
+    if (result.ok && !rec.live && rec.saved >= rec.restorable && !(rec.muted === 0 && justEnded)) rec.done = true;
   });
 }
 
