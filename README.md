@@ -34,19 +34,37 @@ after Twitch deletes it.
 
 ## Install
 
+First build it (needs [Node.js](https://nodejs.org) 18 or newer, nothing else):
+
+```bash
+node build.mjs
+```
+
+This creates, in `dist/`:
+
+| File | Use |
+|---|---|
+| `dist/chrome/` | Chrome, Edge, Brave, Opera: *Load unpacked* |
+| `dist/firefox/` | Firefox: *Load Temporary Add-on* |
+| `twitch-vod-unmuter-chrome-1.0.0.zip` | Upload to the Chrome Web Store |
+| `twitch-vod-unmuter-firefox-1.0.0.zip` | Upload to addons.mozilla.org (signing) |
+
+The two builds differ only in `manifest.json` (Chrome runs the background
+script as a service worker, Firefox as a background page).
+
 ### Chrome, Edge, Brave, Opera
 
 1. Open `chrome://extensions`.
 2. Turn on **Developer mode** (top right).
-3. Click **Load unpacked** and select this folder (the one with `manifest.json`).
+3. Click **Load unpacked** and select the `dist/chrome` folder.
 
-After you change or update the files, click the reload ↻ icon on the
-extension, then reload your Twitch tabs.
+After you change the files, run `node build.mjs` again, click the reload ↻
+icon on the extension, then reload your Twitch tabs.
 
 ### Firefox (128 or newer)
 
 1. Open `about:debugging#/runtime/this-firefox`.
-2. Click **Load Temporary Add-on…** and select `manifest.json` in this folder.
+2. Click **Load Temporary Add-on…** and select `dist/firefox/manifest.json`.
 
 Firefox removes temporary add-ons when it restarts. To keep it installed,
 sign it through [addons.mozilla.org](https://addons.mozilla.org/developers/)
@@ -369,6 +387,7 @@ the player stops loading, turn off *Restore muted audio* and reload.
 ## Project files
 
 ```
+build.mjs              Builds dist/ for Chrome and Firefox (folders + zips)
 manifest.json          Extension manifest (Manifest V3, Chrome + Firefox)
 src/hook.js            Runs in the page and in the player's worker: playlists,
                        segments, audio splicing, saving (IndexedDB)

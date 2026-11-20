@@ -197,7 +197,7 @@
       });
     }
 
-    const audioRange = (vod) => IDBKeyRange.bound(vod + '|', vod + '|￿');
+    const audioRange = (vod) => IDBKeyRange.bound(vod + '|', vod + '|\uffff');
 
     function vodInfo(vod) {
       // Twitch folders look like "<hash>_<channel>_<stream id>_<unix time>".
