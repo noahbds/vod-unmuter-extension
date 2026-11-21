@@ -22,12 +22,15 @@ FEATURES
 • Every quality as a backup: Twitch keeps a separate copy per quality and deletes them separately. If the quality you watch lost a part, the sound is taken from another quality, and the picture stays in yours.
 • Counter in the player, next to the settings button: how many muted parts were unmuted. Hover it for details and the list of every muted part.
 • Green seek bar: unmuted parts in green, still-muted parts in red. Hover one to see its time and where its sound comes from.
+• Fast: an estimate within seconds, then every muted part is checked. VODs whose sound Twitch deleted long ago are recognized in seconds, and opening a VOD again is almost instant.
 • Save audio for later: keeps the sound of muted parts on your computer, compressed (about 0.75 MB per muted minute), with a storage limit and automatic deletion after the delay you choose.
 • Auto-save channels: add your favorite channels, and their new VODs (and live streams) are saved without you opening them.
+• Backups: export your saved audio to a file and import it again, in the same browser or another one.
 
 GOOD TO KNOW
 
 • Restoring only works while Twitch still has the original audio (roughly 13 to 32 hours after a stream ends), or if the extension saved it before. That's what auto-save is for.
+• Works on VODs of streams that are still live.
 • Subscriber-only VODs work when you're logged in to Twitch with a subscribed account.
 • Twitch VOD Unmuter is not affiliated with or endorsed by Twitch.
 
@@ -41,7 +44,7 @@ Everything stays in your browser. No account, no server, no analytics, no tracki
 | Field | File |
 |---|---|
 | Icône du magasin (128×128) | `icons/icon-128.png` |
-| Captures d'écran (1280×800) | `art/store-1280x800.png` |
+| Captures d'écran (1280×800, up to 5, in this order) | `art/store-1280x800.png`, `art/screenshot-1-seekbar.png`, `art/screenshot-2-tooltip.png`, `art/screenshot-3-saved.png`, `art/screenshot-4-settings.png` (or `art/screenshot-5-autosave.png`) |
 | Petite image promotionnelle (440×280) | `art/store-440x280.png` |
 | Bannière extra large (1400×560, optional) | `art/store-1400x560.png` |
 
@@ -59,7 +62,7 @@ Everything stays in your browser. No account, no server, no analytics, no tracki
 ### Description de l'objectif unique
 
 ```
-Restore the audio of muted segments in Twitch VODs. The extension plays Twitch's original, unmuted audio in the Twitch player while it still exists, and keeps a local copy of it so the VOD stays unmuted after Twitch deletes the originals. All its features (unmute counter, seek bar colors, saving, auto-save of chosen channels) serve this single purpose.
+Restore the audio of muted segments in Twitch VODs. The extension plays Twitch's original, unmuted audio in the Twitch player while it still exists, and keeps a local copy of it so the VOD stays unmuted after Twitch deletes the originals. All its features (unmute counter, seek bar colors, saving, auto-save of chosen channels, backup and restore of saved audio) serve this single purpose.
 ```
 
 ### Justification de l'autorisation storage
@@ -77,7 +80,7 @@ Runs the auto-save check every 20 minutes, only when the user has added channels
 ### Justification de l'autorisation d'accès à l'hôte
 
 ```
-www.twitch.tv, m.twitch.tv and player.twitch.tv: the content scripts run on Twitch's VOD player to replace muted video segments with the original audio, to show the unmute counter and seek bar colors, and to store saved audio in twitch.tv's local browser storage. gql.twitch.tv: the background script asks Twitch's API for the recent VODs of the channels the user added to auto-save. The extension runs on no other website and contacts no server other than Twitch.
+www.twitch.tv, m.twitch.tv and player.twitch.tv: the content scripts run on Twitch's VOD player to replace muted video segments with the original audio, to show the unmute counter and seek bar colors, and to store saved audio in twitch.tv's local browser storage (and export or import it on a twitch.tv page, since that's where it is stored). gql.twitch.tv: the background script asks Twitch's API for the recent VODs of the channels the user added to auto-save. The extension runs on no other website and contacts no server other than Twitch.
 ```
 
 ### Consommation des données (what to tick)
@@ -103,3 +106,38 @@ https://github.com/noahbds/vod-unmuter-extension/blob/main/PRIVACY.md
 ```
 
 This only works once `PRIVACY.md` is pushed to GitHub and the repository is public.
+
+---
+
+# Firefox Add-ons (addons.mozilla.org)
+
+### Summary (250 characters max)
+
+```
+Restores the sound in muted parts of Twitch VODs, using Twitch's original audio while it still exists. Saves it on your computer so VODs stay unmuted after Twitch deletes the originals, and can auto-save your favorite channels.
+```
+
+### Description
+
+Same text as the Chrome Web Store description above.
+
+### Categories
+
+Photos, Music & Videos (or Social & Communication)
+
+### Release notes for version 1.2.0
+
+```
+Faster:
+• Old VODs are checked in seconds: when a stream ended more than 36 hours ago and a sample of the VOD has no sound left, the rest isn't checked one by one (205 muted segments: 24.5 s → 7.9 s). Any part you play is still checked.
+• Checking is faster (270 muted segments: 14 s → 10 s), and saving is more than twice as fast (253 segments: 76 s → 32 s).
+
+Fixes:
+• The counter no longer shows the previous VOD's result after moving to another VOD.
+• VODs of streams that are still live keep growing in the player, and their new muted parts are unmuted and saved.
+• Auto-save keeps checking a just-ended VOD with nothing muted for 12 hours, in case Twitch mutes parts later.
+```
+
+### Privacy policy
+
+Paste the content of `PRIVACY.md`, or link to it.
