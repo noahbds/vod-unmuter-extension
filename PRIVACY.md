@@ -1,6 +1,6 @@
 # Privacy policy: Twitch VOD Unmuter
 
-*Last updated: November 20, 2026*
+*Last updated: November 23, 2026*
 
 Twitch VOD Unmuter is a browser extension that restores the sound in muted
 parts of Twitch VODs. This policy explains what data it handles. In short:
@@ -15,10 +15,14 @@ analytics, ads or tracking.**
 | **Twitch video files** of the VODs you open (playlists and 10-second video segments) | To find and play the original, unmuted audio | Downloaded from Twitch's servers, like the Twitch player does |
 | **Saved audio** of muted parts | So a VOD stays unmuted after Twitch deletes the originals (about a day after the stream) | Stored only in your browser, in twitch.tv's local storage (IndexedDB). Never uploaded |
 | **List of deleted Twitch files** (VOD folder name and the numbers of segments Twitch no longer has) | So opening the same VOD again doesn't re-check files that can't come back | Stored only in your browser, in twitch.tv's local storage (IndexedDB). Never uploaded. Removed after 90 days |
+| **Where you are in a VOD** (furthest position reached), only with *Parts ahead of me* | So parts behind it aren't saved again | Stored only in your browser, with that VOD's saved audio (IndexedDB). Never uploaded. Deleted with it |
 | **Backup files** of saved audio | Only when you click *Download backup*, to keep a copy or move it to another browser | Saved by your browser to your downloads folder. The extension never uploads them; importing reads the file you pick, locally |
 | **Your Twitch login token** (the `auth-token` cookie Twitch sets when you log in) | Only for auto-save of subscriber-only VODs: to ask Twitch for access to a VOD, exactly as the Twitch player does | Read inside the twitch.tv page and sent only to Twitch (`gql.twitch.tv`). Never stored or sent anywhere else |
 | **Your settings** and **auto-save channel list** | To remember your choices | Your browser's extension storage. If you use your browser's sync feature, your browser syncs them to your own account |
-| **Auto-save status** (which recent VODs were checked and how much was saved) | To show the status in the extension's menu | Your browser's extension storage, on this device only |
+| **Auto-save status** (which recent VODs were checked and how much was saved) | To show the status in the extension's menu | Your browser's extension storage, on this device only. A channel's entries are deleted when you remove it |
+| **List of saved VODs** (channel, dates, sizes: not the audio) | So the menu can show it when no Twitch tab is open | Your browser's extension storage, on this device only |
+| **Diagnostic report** | Only when you click *Copy report*: version, browser, settings, the VOD's result and recent log lines, to paste in a bug report | Copied to your clipboard. Nothing is sent: you decide where to paste it. It contains no login token and no browsing history |
+| **Notifications** (optional, off by default) | To tell you when auto-save saved a VOD, or couldn't | Shown by your browser. Nothing is sent |
 
 ## What the extension does not do
 
@@ -50,6 +54,8 @@ The extension only contacts Twitch:
   by clearing twitch.tv's site data.
 - **Backup files:** they are ordinary files in your downloads; delete them
   like any other file.
+- **Position in a VOD, list of saved VODs:** deleted with that VOD's saved
+  audio, or when the extension is uninstalled.
 - **Everything:** uninstall the extension and clear twitch.tv's site data.
 
 ## Contact

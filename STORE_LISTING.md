@@ -21,10 +21,12 @@ FEATURES
 • Automatic: open a VOD and the muted parts play with sound. Nothing to click.
 • Every quality as a backup: Twitch keeps a separate copy per quality and deletes them separately. If the quality you watch lost a part, the sound is taken from another quality, and the picture stays in yours.
 • Counter in the player, next to the settings button: how many muted parts were unmuted. Hover it for details and the list of every muted part.
-• Green seek bar: unmuted parts in green, still-muted parts in red. Hover one to see its time and where its sound comes from.
+• Green seek bar: unmuted parts in green, still-muted parts in red. Hover one to see its time, where its sound comes from, whether it's saved, and why it's still muted if it is.
+• Clear explanations: the counter's panel says why a VOD isn't fully unmuted (e.g. "Twitch deleted the original sound: the stream ended 3 days ago") and offers to auto-save that channel's next VODs.
 • Fast: an estimate within seconds, then every muted part is checked. VODs whose sound Twitch deleted long ago are recognized in seconds, and opening a VOD again is almost instant.
-• Save audio for later: keeps the sound of muted parts on your computer, compressed in Chrome, Edge and Brave (about 0.75 MB per muted minute; Firefox keeps it lossless, 1.1 to 2.4 MB), with a storage limit and automatic deletion after the delay you choose.
-• Auto-save channels: add your favorite channels, and their new VODs (and live streams) are saved without you opening them.
+• Save audio for later: keeps the sound of muted parts on your computer, compressed in Chrome, Edge and Brave (about 0.75 MB per muted minute; Firefox keeps it lossless, 1.1 to 2.4 MB), with a storage limit and automatic deletion after the delay you choose. Save the whole VOD, or only the parts ahead of where you are (handy when you resume a stream you watched live).
+• Saved audio in the menu: grouped by channel, pin the VODs to keep forever, export one VOD to a file.
+• Auto-save channels: add your favorite channels, and their new VODs (and live streams) are saved without you opening them. Optional notifications when it's done.
 • Backups: export your saved audio to a file and import it again, in the same browser or another one.
 
 GOOD TO KNOW
@@ -148,17 +150,29 @@ Same text as the Chrome Web Store description above.
 
 Photos, Music & Videos (or Social & Communication)
 
-### Release notes for version 1.2.0
+### Release notes for version 1.3.0
 
 ```
-Faster:
-• Old VODs are checked in seconds: when a stream ended more than 36 hours ago and a sample of the VOD has no sound left, the rest isn't checked one by one (205 muted segments: 24.5 s → 7.9 s). Any part you play is still checked.
-• Checking is faster (270 muted segments: 14 s → 10 s), and saving is more than twice as fast (253 segments: 76 s → 32 s).
+Explanations:
+• Hover a muted part of the seek bar to see why it's still muted (deleted by Twitch, network problem, …) and whether it's saved.
+• The counter's panel says why a VOD isn't fully unmuted, with a button to auto-save that channel's next VODs.
+• "Not active" warning when another extension keeps VOD Unmuter out of Twitch's player.
+• The menu shows a status, and "Copy report" makes a diagnostic report for bug reports (no personal data).
+
+New:
+• Redesigned menu with tabs: Settings, Auto-save, Saved, Help.
+• "Parts ahead of me": save only the muted parts ahead of where you are; parts behind are never downloaded, and their copies are removed.
+• Saved audio grouped by channel; pin a VOD to keep it forever; export one VOD; list visible without a Twitch tab.
+• Auto-save: suggestions, optional notifications, status on the toolbar icon.
+• Live checking: the seek bar fills in while the VOD is checked.
+• A first-run page explaining what the extension can and can't do.
 
 Fixes:
-• The counter no longer shows the previous VOD's result after moving to another VOD.
-• VODs of streams that are still live keep growing in the player, and their new muted parts are unmuted and saved.
-• Auto-save keeps checking a just-ended VOD with nothing muted for 12 hours, in case Twitch mutes parts later.
+• The counter could show another tab's VOD, or jump between two results.
+• Network errors no longer make parts look deleted; they're retried.
+• Embedded players and the mobile site now say why they can't be unmuted (Twitch only gives the original sound to www.twitch.tv).
+• Firefox: saved quality is Original (Firefox can't compress audio), said clearly.
+• Storage full, VODs still recording, removed auto-save channels: handled properly.
 ```
 
 ### Privacy policy
