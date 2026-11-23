@@ -1,0 +1,12 @@
+# Weekly update PRs for web-ext (the only npm dependency) and the GitHub
+# Actions used by the CI workflow. Security fixes come on their own anyway.
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
