@@ -186,7 +186,7 @@ Restores the sound in muted parts of Twitch VODs, using Twitch's original audio 
 ### Notes aux testeurs (reviewer notes)
 
 ```
-No build step changes the code: build.mjs only copies src/, popup/, icons/ and LICENSE into dist/firefox and writes the Firefox manifest (background "scripts" instead of a service worker, plus browser_specific_settings). Nothing is minified, bundled or generated, so the uploaded files are the source. Source repository: https://github.com/noahbds/vod-unmuter-extension
+Nothing is minified, transpiled or renamed, and there is no third-party code or bundler. build.mjs (plain Node, no dependencies) copies popup/, icons/, LICENSE and src/*.js into dist/firefox and writes the Firefox manifest (background "scripts" instead of a service worker, plus browser_specific_settings). The one assembled file is src/hook.js: its source is split into readable modules (src/shared, src/media, src/storage, src/recovery, src/player, src/messaging), and build.mjs puts each module in place of its "// @include" line in the src/hook.js template, removing only the "import" lines and "export" keywords. Each module starts with a "// ---- src/<module> ----" banner, so the uploaded hook.js reads as the source files in order. To rebuild: node build.mjs (Node 18+), which gives the same files. Source repository: https://github.com/noahbds/vod-unmuter-extension
 
 How to test (no Twitch account needed):
 1. Open a Twitch VOD that ended less than ~10 hours ago and has muted parts (red marks on the seek bar). Muted parts play with sound; a counter "restored / muted" appears next to the player's settings button.
@@ -194,7 +194,7 @@ How to test (no Twitch account needed):
 3. Extension menu: settings, auto-save channels, saved audio, Help (status, diagnostic report).
 
 Why some code looks unusual:
-- src/hook.js runs in the page (content script, world MAIN) and must also run inside Twitch's video player, which is a Web Worker created from a Blob. It wraps window.Worker and window.Blob to prepend its own code (the same file) to the player worker. Nothing else is changed in Twitch's code.
+- src/hook.js runs in the page (content script, world MAIN) and must also run inside Twitch's video player, which is a Web Worker created from a Blob. It wraps window.Worker and window.Blob to prepend its own code (the same file, minus the part between /* vu:page-only:start */ and /* vu:page-only:end */, which only the page uses) to the player worker. Nothing else is changed in Twitch's code.
 - It fetches Twitch's own files (playlists and 10-second video segments from Twitch's CDN) to find the original, unmuted audio, and splices that audio into the muted segments (MPEG-TS packets, in JavaScript).
 - gql.twitch.tv is called with Twitch's public web client id (the one twitch.tv itself uses) to list recent VODs of the channels the user adds to auto-save. For subscriber-only VODs, the user's Twitch "auth-token" cookie is read in the twitch.tv page and sent only to gql.twitch.tv to get a playback token, exactly like Twitch's player.
 - Auto-save may open https://www.twitch.tv/robots.txt in a background tab (and close it) when no Twitch tab is open, because saved audio lives in twitch.tv's IndexedDB.

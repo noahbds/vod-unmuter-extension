@@ -1,5 +1,29 @@
 # Changelog
 
+## 1.4.0 (in progress: not released yet)
+
+No change in what the extension does: this version reorganizes its code.
+
+`src/hook.js` (2,100 lines) is split into 20 modules by what they do
+(`src/shared`, `src/media`, `src/storage`, `src/recovery`, `src/player`,
+`src/messaging`). `node build.mjs` puts them back into one plain
+`src/hook.js` (no dependencies, nothing minified), then checks it: every
+module imports what it uses from another, nothing is declared twice, and the
+built file is started in a fake page and a fake player worker that have
+nothing else in them.
+
+The player worker's copy of the hook no longer includes the code only the
+page uses (backup files, auto-save): about 8% less code injected into
+Twitch's player (84 KB instead of 91 KB).
+
+New unit tests (`cd test && npm run test:unit`, no browser, under a second):
+MPEG-TS parsing and splicing, ADTS ↔ TS round trips, saved audio totals,
+backup files (export, import, damaged files), storage full, which qualities
+are tried in which order, the seek bar's ranges, and the built hook run in
+the fake page and worker (playlist rewriting, own file, another quality
+spliced in). A test also checks that the five places with default settings
+agree.
+
 ## 1.3.0 (in progress: not released yet)
 
 **"Parts ahead of me"** replaces "Parts I play" in *What to save*. Only the

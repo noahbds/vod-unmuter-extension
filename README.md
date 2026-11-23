@@ -47,8 +47,8 @@ This creates, in `dist/`:
 |---|---|
 | `dist/chrome/` | Chrome, Edge, Brave, Opera: *Load unpacked* |
 | `dist/firefox/` | Firefox: *Load Temporary Add-on* |
-| `twitch-vod-unmuter-chrome-1.3.0.zip` | Upload to the Chrome Web Store |
-| `twitch-vod-unmuter-firefox-1.3.0.zip` | Upload to addons.mozilla.org (signing) |
+| `twitch-vod-unmuter-chrome-1.4.0.zip` | Upload to the Chrome Web Store |
+| `twitch-vod-unmuter-firefox-1.4.0.zip` | Upload to addons.mozilla.org (signing) |
 
 The two builds differ only in `manifest.json` (Chrome runs the background
 script as a service worker, Firefox as a background page).
@@ -466,8 +466,17 @@ the player stops loading, turn off *Restore muted audio* and reload.
 
 ## Testing
 
-The tests run the real extension on live Twitch VODs (found at run time,
-since VODs age), in Chrome for Testing and Firefox.
+Unit tests (no browser, no network, under a second; Node 22 or later) cover
+the code that needs no Twitch: MPEG-TS and ADTS parsing and splicing, saved
+audio accounting, backup files, what the UI is told, and the built
+`src/hook.js` run in a fake page and player worker:
+
+```bash
+cd test && npm run test:unit
+```
+
+The browser tests run the real extension on live Twitch VODs (found at run
+time, since VODs age), in Chrome for Testing and Firefox.
 
 ```bash
 cd test
@@ -489,15 +498,24 @@ console (page or player) that the test doesn't expect. See
 
 ```
 CHANGELOG.md           What changed in each version
-PLAN-1.3.md            Work plan for 1.3: bug fixes, reliability, features, tests
-ROADMAP.md             Later ideas, and ideas considered but not planned
+PLAN-1.4.md            Work plan for 1.4: splitting src/hook.js into modules
 RELEASE.md             Release checklist
 test/                  Browser tests (run.cjs), Twitch change detector
-                       (twitch-check.cjs), test fixtures
-build.mjs              Builds dist/ for Chrome and Firefox (folders + zips)
+                       (twitch-check.cjs), unit tests (unit/), test fixtures
+build.mjs              Builds dist/ for Chrome and Firefox (folders + zips):
+                       puts src/hook.js together from its modules, checks it
 manifest.json          Extension manifest (Manifest V3, Chrome + Firefox)
-src/hook.js            Runs in the page and in the player's worker: playlists,
-                       segments, audio splicing, saving (IndexedDB)
+src/hook.js            Runs in the page and in the player's worker. A template:
+                       the build replaces its "// @include" lines with:
+  shared/              constants, shared state, logging
+  media/               MPEG-TS (find, extract, splice audio), ADTS <-> TS,
+                       compression (deflate, AAC re-encoding with WebCodecs)
+  storage/             IndexedDB: saved audio, deleted-files cache, backups
+  recovery/            checking muted parts, what the UI is told, saving,
+                       auto-save
+  player/              playlist and segment requests, channel messages,
+                       getting the hook into the player's worker
+  messaging/           the page's side of bridge.js
 src/ui.js              Counter, panel, seek bar colors, hover details
 src/bridge.js          Passes settings, popup and auto-save requests to the page
 src/background.js      Auto-save timer: finds recent VODs, picks a Twitch tab

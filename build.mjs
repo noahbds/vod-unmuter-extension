@@ -11,29 +11,34 @@
 // The two builds differ only in manifest.json: Chrome runs the background
 // script as a service worker, Firefox as background scripts, and only Firefox
 // gets its add-on settings (id, minimum version).
+//
+// src/hook.js is put together from its modules (src/shared, src/media,
+// src/storage, src/recovery, src/player, src/messaging): each
+// "// @include <module>" line of src/hook.js is replaced by that file, without
+// its `import` lines and `export` keywords. Nothing is minified or renamed.
+// Every other file is copied as it is. The build then checks the result (see
+// "hook checks" below) and stops if anything is wrong.
+//
+// This file can also be imported (the unit tests do): it only builds when run.
 import fs from 'node:fs';
 import path from 'node:path';
+import vm from 'node:vm';
 import zlib from 'node:zlib';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const DIST = path.join(ROOT, 'dist');
 const FILES = ['src', 'popup', 'icons', 'LICENSE']; // everything the extension needs
-const base = JSON.parse(fs.readFileSync(path.join(ROOT, 'manifest.json'), 'utf8'));
+const HOOK = 'src/hook.js';
+// Modules that only the page uses: in src/hook.js they sit outside
+// installUnmuteHook, or between the page-only markers (cut out of the copy
+// sent to the player worker).
+const PAGE_ONLY = ['storage/backup.js', 'recovery/auto-save.js', 'player/worker-injection.js', 'messaging/page-bridge.js'];
+// What the page exposes, used by ui.js, bridge.js (through the page) and the tests.
+const STORE_API = ['list', 'remove', 'expire', 'exportSaved', 'importSaved', 'readBackupHeader', 'clearGone', 'pin'];
+const DEBUG_API = ['jobs', 'renditions', 'scanTs', 'extractAudio', 'spliceAudio', 'listSaved', 'loadRecord', 'recordToAudio', 'muxAdts', 'splitAdts', 'packetsToAdts', 'encoderDelay'];
 
-const manifests = {
-  chrome() {
-    const m = structuredClone(base);
-    m.background = { service_worker: base.background.service_worker };
-    delete m.browser_specific_settings;
-    return m;
-  },
-  firefox() {
-    const m = structuredClone(base);
-    m.background = { scripts: base.background.scripts };
-    return m;
-  },
-};
+const readText = (rel) => fs.readFileSync(path.join(ROOT, rel), 'utf8');
 
 // ---------------------------------------------------------------- files
 function listFiles(dir) {
@@ -47,16 +52,29 @@ function listFiles(dir) {
   return out;
 }
 
-function copyInto(target) {
+// The hook's modules (src/<folder>/<file>.js) are not copied: they are inside
+// src/hook.js.
+const isHookModule = (rel) => rel.startsWith('src/') && rel.split('/').length > 2;
+
+function sourceFiles() {
   const files = [];
   for (const item of FILES) {
     const src = path.join(ROOT, item);
     for (const file of fs.statSync(src).isDirectory() ? listFiles(src) : [src]) {
-      const rel = path.relative(ROOT, file).split(path.sep).join('/');
-      fs.mkdirSync(path.dirname(path.join(target, rel)), { recursive: true });
-      fs.copyFileSync(file, path.join(target, rel));
-      files.push(rel);
+      files.push(path.relative(ROOT, file).split(path.sep).join('/'));
     }
+  }
+  return files;
+}
+
+function copyInto(target, hookCode) {
+  const files = [];
+  for (const rel of sourceFiles()) {
+    if (isHookModule(rel)) continue;
+    fs.mkdirSync(path.dirname(path.join(target, rel)), { recursive: true });
+    if (rel === HOOK) fs.writeFileSync(path.join(target, rel), hookCode);
+    else fs.copyFileSync(path.join(ROOT, rel), path.join(target, rel));
+    files.push(rel);
   }
   return files;
 }
@@ -125,40 +143,369 @@ function zip(dir, names, outFile) {
   fs.writeFileSync(outFile, Buffer.concat([...parts, centralBuf, end]));
 }
 
-// ---------------------------------------------------------------- checks
-if (base.description.length > 132) { // Chrome Web Store limit
-  console.error(`manifest.json: description is ${base.description.length} characters; the Chrome Web Store allows 132.`);
-  process.exit(1);
+// ---------------------------------------------------------------- JS scanner
+// Just enough of a tokenizer to find what a module declares at its top level
+// and which names it really uses (not in comments, strings or regexes, not
+// `obj.prop` or `{ key: … }`).
+const KW_BEFORE_REGEX = new Set(['return', 'typeof', 'case', 'do', 'else', 'in', 'of', 'new', 'delete', 'void', 'throw', 'instanceof', 'await', 'yield']);
+function scanJs(code) {
+  const toks = [];
+  const stack = []; // open braces: 'code' or 'tmpl' (a template's ${)
+  const n = code.length;
+  let i = 0;
+  const depth = () => stack.filter((s) => s === 'code').length;
+  const regexAllowed = () => {
+    const p = toks[toks.length - 1];
+    if (!p) return true;
+    if (p.type === 'id') return KW_BEFORE_REGEX.has(p.value);
+    return p.type === 'punc' && p.value !== ')' && p.value !== ']';
+  };
+  const template = () => { // inside a template literal, up to its end or a ${
+    while (i < n) {
+      const c = code[i];
+      if (c === '\\') { i += 2; continue; }
+      if (c === '`') { i++; toks.push({ type: 'str' }); return; }
+      if (c === '$' && code[i + 1] === '{') { i += 2; stack.push('tmpl'); toks.push({ type: 'punc', value: '(' }); return; }
+      i++;
+    }
+    throw new Error('unterminated template literal');
+  };
+  while (i < n) {
+    const c = code[i];
+    if (/\s/.test(c)) { i++; continue; }
+    if (c === '/' && code[i + 1] === '/') { while (i < n && code[i] !== '\n') i++; continue; }
+    if (c === '/' && code[i + 1] === '*') { const e = code.indexOf('*/', i + 2); i = e < 0 ? n : e + 2; continue; }
+    if (c === '\'' || c === '"') {
+      for (i++; i < n && code[i] !== c; i++) if (code[i] === '\\') i++;
+      i++;
+      toks.push({ type: 'str' });
+      continue;
+    }
+    if (c === '`') { i++; template(); continue; }
+    if (c === '/' && regexAllowed()) {
+      let cls = false;
+      for (i++; i < n; i++) {
+        const d = code[i];
+        if (d === '\\') { i++; continue; }
+        if (d === '\n') throw new Error('unterminated regex');
+        if (d === '[') cls = true;
+        else if (d === ']') cls = false;
+        else if (d === '/' && !cls) break;
+      }
+      for (i++; i < n && /[a-z]/i.test(code[i]); i++);
+      toks.push({ type: 'regex' });
+      continue;
+    }
+    if (/[A-Za-z_$]/.test(c)) {
+      let j = i + 1;
+      while (j < n && /[\w$]/.test(code[j])) j++;
+      toks.push({ type: 'id', value: code.slice(i, j), depth: depth() });
+      i = j;
+      continue;
+    }
+    if (/[0-9]/.test(c) || (c === '.' && /[0-9]/.test(code[i + 1]))) {
+      for (i++; i < n && /[\w.]/.test(code[i]); i++);
+      toks.push({ type: 'num' });
+      continue;
+    }
+    if (c === '{') { stack.push('code'); toks.push({ type: 'punc', value: '{' }); i++; continue; }
+    if (c === '}') {
+      i++;
+      if (stack.pop() === 'tmpl') { toks.push({ type: 'punc', value: ')' }); template(); } else toks.push({ type: 'punc', value: '}' });
+      continue;
+    }
+    if (c === '?' && code[i + 1] === '.' && !/[0-9]/.test(code[i + 2])) { toks.push({ type: 'punc', value: '.' }); i += 2; continue; }
+    toks.push({ type: 'punc', value: c });
+    i++;
+  }
+  if (stack.length) throw new Error('unbalanced braces');
+  const ids = [];
+  toks.forEach((t, k) => {
+    if (t.type === 'id') ids.push({ name: t.value, depth: t.depth, prev: toks[k - 1], prev2: toks[k - 2], next: toks[k + 1], next2: toks[k + 2] });
+  });
+  return ids;
+}
+const isPunc = (t, ...v) => !!t && t.type === 'punc' && v.includes(t.value);
+
+function topLevelDecls(ids) {
+  return ids.filter((t) => t.depth === 0 && t.prev && t.prev.type === 'id' &&
+    ['function', 'class', 'const', 'let', 'var'].includes(t.prev.value)).map((t) => t.name);
 }
 
-// Chrome refuses to load the extension if a script isn't strict UTF-8, which
-// includes Unicode "non-characters" such as U+FFFF (Firefox accepts them).
-// Write them as escapes ('￿') in the source instead.
-for (const item of FILES) {
-  const src = path.join(ROOT, item);
-  for (const file of fs.statSync(src).isDirectory() ? listFiles(src) : [src]) {
-    if (!/\.(js|html|css|json)$/.test(file)) continue;
-    const text = new TextDecoder('utf-8', { fatal: true }).decode(fs.readFileSync(file));
+function usedNames(ids) {
+  return new Set(ids.filter((t) => !isPunc(t.prev, '.') && !(isPunc(t.next, ':') && isPunc(t.prev, '{', ','))).map((t) => t.name));
+}
+
+// `name = …`, `name += …`, `name++`, `++name` (not `==`, `=>`, `obj.name = …`).
+function assignedNames(ids) {
+  return new Set(ids.filter((t) => !isPunc(t.prev, '.') && (
+    (isPunc(t.next, '=') && !isPunc(t.next2, '=', '>')) ||
+    (isPunc(t.next, '+', '-', '*', '/', '%', '&', '|', '^') && isPunc(t.next2, '=')) ||
+    (isPunc(t.next, '+') && isPunc(t.next2, '+')) || (isPunc(t.next, '-') && isPunc(t.next2, '-')) ||
+    (isPunc(t.prev, '+') && isPunc(t.prev2, '+')) || (isPunc(t.prev, '-') && isPunc(t.prev2, '-'))
+  )).map((t) => t.name));
+}
+
+// ---------------------------------------------------------------- hook.js
+const IMPORT_RE = /^import\s*\{([^}]*)\}\s*from\s*'([^']+)';[ \t]*\n/gm;
+
+function readModule(rel) {
+  const file = 'src/' + rel;
+  if (!fs.existsSync(path.join(ROOT, file))) throw new Error(`${HOOK} includes ${rel}, but ${file} doesn't exist`);
+  const text = readText(file);
+  const imports = [...text.matchAll(IMPORT_RE)].map((m) => ({
+    names: m[1].split(',').map((s) => s.trim()).filter(Boolean),
+    from: path.posix.normalize(path.posix.join(path.posix.dirname(rel), m[2])),
+  }));
+  const body = text.replace(IMPORT_RE, '').replace(/^export (?=(async function|function|const|let|class) )/gm, '');
+  if (/^\s*(import|export)\b/m.test(body)) throw new Error(`${file}: an import/export the build can't handle (use "import { a, b } from './x.js';" and "export function/const/let …")`);
+  const ids = scanJs(text.replace(IMPORT_RE, ''));
+  return { rel, file, body: body.replace(/^\n+/, '').replace(/\n{3,}/g, '\n\n').replace(/\s+$/, ''), imports, ids, decls: topLevelDecls(ids) };
+}
+
+// Builds dist's src/hook.js from the template and its modules, after checking
+// that the modules fit together.
+export function assembleHook() {
+  const template = readText(HOOK);
+  const problems = [];
+  const includes = []; // { rel, inside: in installUnmuteHook?, pageOnly }
+  let inHook = false, pageOnly = false;
+  for (const line of template.split('\n')) {
+    if (/^\s*function installUnmuteHook\(scope\) \{$/.test(line)) inHook = true;
+    else if (inHook && /^ {2}\}$/.test(line)) inHook = false;
+    if (line.includes('/* vu:page-only:start */')) pageOnly = true;
+    if (line.includes('/* vu:page-only:end */')) pageOnly = false;
+    const m = line.match(/^\s*\/\/ @include (\S+)$/);
+    if (m) includes.push({ rel: m[1], inside: inHook, pageOnly: pageOnly || !inHook });
+  }
+  if ((template.match(/\/\* vu:page-only:start \*\//g) || []).length !== 1 || (template.match(/\/\* vu:page-only:end \*\//g) || []).length !== 1) {
+    problems.push(`${HOOK}: needs exactly one /* vu:page-only:start */ … /* vu:page-only:end */ region`);
+  }
+
+  const mods = new Map();
+  for (const inc of includes) {
+    if (mods.has(inc.rel)) { problems.push(`${HOOK}: ${inc.rel} is included twice`); continue; }
+    mods.set(inc.rel, Object.assign(readModule(inc.rel), inc));
+  }
+  for (const rel of sourceFiles().filter(isHookModule).map((f) => f.slice(4))) {
+    if (rel.endsWith('.js') && !mods.has(rel)) problems.push(`src/${rel} is not included by ${HOOK}`);
+  }
+  for (const m of mods.values()) {
+    if (PAGE_ONLY.includes(m.rel) !== m.pageOnly) {
+      problems.push(`${m.file}: ${PAGE_ONLY.includes(m.rel) ? 'page-only module outside the page-only parts' : 'included in a page-only part but not listed in PAGE_ONLY'} of ${HOOK}`);
+    }
+  }
+
+  // The modules inside installUnmuteHook share one scope: each name is
+  // declared once, imports point at real declarations, and every name a
+  // module takes from another is imported (so each file says what it needs).
+  const inner = [...mods.values()].filter((m) => m.inside);
+  const owner = new Map();
+  for (const m of inner) {
+    for (const d of m.decls) {
+      if (owner.has(d)) problems.push(`"${d}" is declared in both ${owner.get(d).file} and ${m.file}`);
+      else owner.set(d, m);
+    }
+  }
+  for (const m of mods.values()) {
+    if (!m.inside && m.imports.length) problems.push(`${m.file}: runs outside installUnmuteHook, so it can't import from the hook's modules`);
+    const imported = new Set();
+    for (const imp of m.imports) {
+      const from = mods.get(imp.from);
+      if (!from || !from.inside) { problems.push(`${m.file}: imports from ${imp.from}, which isn't a module of installUnmuteHook`); continue; }
+      if (from.pageOnly && !m.pageOnly) problems.push(`${m.file}: runs in the player worker too, but imports from the page-only ${from.file}`);
+      for (const name of imp.names) {
+        imported.add(name);
+        if (!from.decls.includes(name)) problems.push(`${m.file}: imports "${name}", which ${from.file} doesn't declare`);
+      }
+    }
+    if (!m.inside) continue;
+    for (const name of usedNames(m.ids)) {
+      const o = owner.get(name);
+      if (o && o !== m && !imported.has(name)) problems.push(`${m.file}: uses "${name}" from ${o.file} without importing it`);
+    }
+    for (const name of assignedNames(m.ids)) {
+      if (imported.has(name)) problems.push(`${m.file}: assigns "${name}", which belongs to ${owner.get(name).file} (change it there)`);
+    }
+  }
+  if (problems.length) throw new Error(problems.join('\n'));
+
+  const code = template.split('\n').map((line) => {
+    const m = line.match(/^(\s*)\/\/ @include (\S+)$/);
+    if (!m) return line;
+    const mod = mods.get(m[2]);
+    return [`${m[1]}// ---- src/${mod.rel} ----`].concat(mod.body.split('\n').map((l) => (l ? m[1] + l : l))).join('\n');
+  }).join('\n');
+  return { code, modules: [...mods.values()] };
+}
+
+// ---------------------------------------------------------------- sandbox
+// Runs the built hook in fake page and player-worker globals that have only
+// standard JavaScript plus the web APIs listed here: if the worker's copy used
+// anything from outside installUnmuteHook, it would fail here.
+export function makeSandbox(kind, opts = {}) {
+  const rec = { console: [], posted: [], channels: [], workers: [], windowMessages: [], blobs: new Map() };
+  let blobId = 0;
+  class SandboxURL extends URL {
+    static createObjectURL(obj) { const u = `blob:https://www.twitch.tv/${++blobId}`; rec.blobs.set(u, obj); return u; }
+    static revokeObjectURL(u) { rec.blobs.delete(u); }
+  }
+  class FakeChannel {
+    constructor(name) { this.name = name; this.listeners = []; rec.channels.push(this); }
+    addEventListener(type, fn) { if (type === 'message') this.listeners.push(fn); }
+    postMessage(data) { rec.posted.push(structuredClone(data)); }
+    close() {}
+  }
+  const say = (level) => (...args) => rec.console.push({ level, text: args.map(String).join(' ') });
+  const g = {
+    console: { log: say('log'), info: say('info'), debug: say('debug'), warn: say('warn'), error: say('error') },
+    setTimeout: opts.timers ? setTimeout : () => 0, clearTimeout: opts.timers ? clearTimeout : () => {},
+    URL: SandboxURL, Blob, Response, Request, Headers, AbortController, TextEncoder, TextDecoder,
+    CompressionStream, DecompressionStream, structuredClone, queueMicrotask,
+    BroadcastChannel: FakeChannel,
+    fetch: opts.fetch || (async () => new Response('', { status: 404 })),
+    indexedDB: opts.indexedDB, IDBKeyRange: opts.IDBKeyRange,
+  };
+  if (kind === 'page') {
+    Object.assign(g, {
+      document: { cookie: '' },
+      location: { origin: 'https://www.twitch.tv', href: 'https://www.twitch.tv/videos/1' },
+      navigator: {},
+      Worker: class { constructor(url, options) { this.url = String(url); this.options = options; rec.workers.push(this); } },
+      XMLHttpRequest: class { open() { throw new Error('sync XHR in the sandbox'); } },
+      addEventListener() {},
+      postMessage(data) { rec.windowMessages.push(data); },
+    });
+  }
+  const ctx = vm.createContext(g);
+  const global = vm.runInContext('globalThis', ctx);
+  global[kind === 'page' ? 'window' : 'self'] = global;
+  return { ctx, global, rec, run: (code, filename) => vm.runInContext(code, ctx, { filename }) };
+}
+
+// Boots the built hook as Twitch would: in the page, then in a player worker
+// made from a Blob. Throws if anything is off.
+export async function sandboxCheck(code, opts = {}) {
+  const fail = (msg) => { throw new Error('sandbox: ' + msg); };
+  const page = makeSandbox('page', opts);
+  page.run(code, 'dist/src/hook.js');
+  const w = page.global;
+  if (!w.__vodUnmuterLoaded || !w.__vodUnmuterHooked) fail('the page was not hooked');
+  if (!/^[a-z0-9]{1,8}$/.test(w.__vodUnmuterTab)) fail('no tab id');
+  if (!w.__vodUnmuterStore || STORE_API.some((k) => typeof w.__vodUnmuterStore[k] !== 'function')) fail(`__vodUnmuterStore must have ${STORE_API.join(', ')}`);
+  if (!w.__vodUnmuterAuto || typeof w.__vodUnmuterAuto.save !== 'function') fail('no __vodUnmuterAuto.save');
+  if (!w.__vodUnmuterDebug || DEBUG_API.some((k) => !(k in w.__vodUnmuterDebug))) fail(`__vodUnmuterDebug must have ${DEBUG_API.join(', ')}`);
+
+  // a. Twitch makes its player worker from a Blob of its code.
+  const playerCode = '/* amazon-ivs-wasmworker */ void 0;\n';
+  const blob = page.run(`new Blob([${JSON.stringify(playerCode)}])`);
+  const workerCode = await blob.text();
+  if (!workerCode.startsWith(`self.__vodUnmuterTab = ${JSON.stringify(w.__vodUnmuterTab)};\n(function installUnmuteHook(scope)`)) fail('the player\'s Blob was not given the hook');
+  if (!workerCode.endsWith(')(self);\n' + playerCode)) fail('the player\'s own code must follow the hook');
+  if (workerCode.includes('vu:page-only')) fail('the page-only part was not cut out of the worker\'s copy');
+  // b. A Worker made from a URL gets the hook too; one already hooked is left alone.
+  page.run('new Worker("https://www.twitch.tv/player-worker.js")');
+  const wrapped = await page.rec.blobs.get(page.rec.workers[0].url).text();
+  if (!wrapped.endsWith('importScripts("https://www.twitch.tv/player-worker.js");')) fail('a Worker from a URL was not wrapped');
+  const hookedUrl = page.run('URL.createObjectURL')(blob);
+  page.run(`new Worker(${JSON.stringify(hookedUrl)})`);
+  if (page.rec.workers[1].url !== hookedUrl) fail('an already hooked worker was hooked twice');
+
+  // The page-only modules must not reach the worker.
+  const pageOnlyNames = new Set(assembleHookPageOnlyNames(code));
+  const leaked = [...usedNames(scanJs(workerCode))].filter((n) => pageOnlyNames.has(n));
+  if (leaked.length) fail(`the player worker's copy uses page-only code: ${leaked.join(', ')}`);
+
+  const worker = makeSandbox('worker', opts);
+  const ownFetch = worker.global.fetch;
+  worker.run(workerCode, 'player-worker.js');
+  const s = worker.global;
+  if (!s.__vodUnmuterHooked || s.__vodUnmuterTab !== w.__vodUnmuterTab) fail('the player worker was not hooked');
+  if (s.fetch === ownFetch || typeof s.fetch !== 'function') fail('the worker\'s fetch was not hooked');
+  if (s.__vodUnmuterStore || s.__vodUnmuterAuto) fail('the worker must not expose the page\'s store');
+  if (!s.__vodUnmuterDebug || DEBUG_API.some((k) => !(k in s.__vodUnmuterDebug))) fail('no __vodUnmuterDebug in the worker');
+  if (!worker.rec.posted.some((m) => m.type === 'hello' && m.where === 'player' && m.tab === w.__vodUnmuterTab)) fail('the worker did not say hello on the channel');
+
+  await new Promise((r) => setImmediate(r));
+  const problems = [...page.rec.console, ...worker.rec.console].filter((l) => /^(warn|error)$/.test(l.level));
+  if (problems.length) fail('console: ' + problems.map((l) => l.text).join(' | '));
+  return { page, worker, workerCode };
+}
+
+// Names declared by the page-only modules, read back from the built file's banners.
+function assembleHookPageOnlyNames(code) {
+  const names = [];
+  const parts = code.split(/^\s*\/\/ ---- src\/(\S+) ----$/m);
+  for (let k = 1; k < parts.length; k += 2) {
+    if (!PAGE_ONLY.includes(parts[k])) continue;
+    names.push(...topLevelDecls(scanJs(parts[k + 1].split(/^\s*\/\* vu:page-only:end \*\/$/m)[0])));
+  }
+  return names;
+}
+
+// ---------------------------------------------------------------- checks
+function checkSources() {
+  const base = JSON.parse(readText('manifest.json'));
+  if (base.description.length > 132) { // Chrome Web Store limit
+    throw new Error(`manifest.json: description is ${base.description.length} characters; the Chrome Web Store allows 132.`);
+  }
+  // Chrome refuses to load the extension if a script isn't strict UTF-8, which
+  // includes Unicode "non-characters" such as U+FFFF (Firefox accepts them).
+  // Write them as escapes ('￿') in the source instead.
+  for (const rel of sourceFiles()) {
+    if (!/\.(js|html|css|json)$/.test(rel)) continue;
+    const text = new TextDecoder('utf-8', { fatal: true }).decode(fs.readFileSync(path.join(ROOT, rel)));
     const bad = [...text].findIndex((ch) => {
       const c = ch.codePointAt(0);
       return (c >= 0xfdd0 && c <= 0xfdef) || (c & 0xfffe) === 0xfffe;
     });
-    if (bad >= 0) {
-      console.error(`${path.relative(ROOT, file)}: contains a Unicode non-character (Chrome won't load it). Use an escape like '\\uffff' instead.`);
-      process.exit(1);
-    }
+    if (bad >= 0) throw new Error(`${rel}: contains a Unicode non-character (Chrome won't load it). Use an escape like '\\uffff' instead.`);
+  }
+  return base;
+}
+
+// Every script the extension loads must at least parse.
+function checkSyntax(files, hookCode) {
+  for (const rel of files) {
+    if (!rel.endsWith('.js')) continue;
+    try { new vm.Script(rel === HOOK ? hookCode : readText(rel), { filename: rel }); } catch (e) { throw new Error(`${rel}: ${e.message}`); }
   }
 }
 
 // ---------------------------------------------------------------- build
-fs.rmSync(DIST, { recursive: true, force: true });
-for (const [browser, makeManifest] of Object.entries(manifests)) {
-  const dir = path.join(DIST, browser);
-  const files = copyInto(dir);
-  fs.writeFileSync(path.join(dir, 'manifest.json'), JSON.stringify(makeManifest(), null, 2) + '\n');
-  files.push('manifest.json');
-  const zipName = `twitch-vod-unmuter-${browser}-${base.version}.zip`;
-  zip(dir, files, path.join(DIST, zipName));
-  const kb = (fs.statSync(path.join(DIST, zipName)).size / 1024).toFixed(0);
-  console.log(`${browser.padEnd(8)} dist/${browser}/  +  dist/${zipName} (${files.length} files, ${kb} KB)`);
+async function main() {
+  const base = checkSources();
+  const { code: hookCode, modules } = assembleHook();
+  checkSyntax(sourceFiles().filter((f) => !isHookModule(f)), hookCode);
+  await sandboxCheck(hookCode);
+  console.log(`hook     ${HOOK} from ${modules.length} modules: checked (imports, page-only parts, page + worker sandbox)`);
+
+  const manifests = {
+    chrome() {
+      const m = structuredClone(base);
+      m.background = { service_worker: base.background.service_worker };
+      delete m.browser_specific_settings;
+      return m;
+    },
+    firefox() {
+      const m = structuredClone(base);
+      m.background = { scripts: base.background.scripts };
+      return m;
+    },
+  };
+  fs.rmSync(DIST, { recursive: true, force: true });
+  for (const [browser, makeManifest] of Object.entries(manifests)) {
+    const dir = path.join(DIST, browser);
+    const files = copyInto(dir, hookCode);
+    fs.writeFileSync(path.join(dir, 'manifest.json'), JSON.stringify(makeManifest(), null, 2) + '\n');
+    files.push('manifest.json');
+    const zipName = `twitch-vod-unmuter-${browser}-${base.version}.zip`;
+    zip(dir, files, path.join(DIST, zipName));
+    const kb = (fs.statSync(path.join(DIST, zipName)).size / 1024).toFixed(0);
+    console.log(`${browser.padEnd(8)} dist/${browser}/  +  dist/${zipName} (${files.length} files, ${kb} KB)`);
+  }
+}
+
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  main().catch((e) => { console.error(e.message); process.exit(1); });
 }
