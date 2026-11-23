@@ -51,6 +51,15 @@ installed) and in parts of the code that were never tested outside Chromium.
 
 ## Phase 2: reliability and explanations
 
+**Status: done** (see CHANGELOG.md, 1.3.0). Changes from the plan:
+- The debug log prefixes each line with the channel and quality instead of
+  grouping with `console.groupCollapsed`: checks run in parallel, so groups
+  would interleave.
+- A damaged saved copy is reported ("saved copy unusable") and kept muted,
+  not deleted and saved again.
+- Subscriber-only VODs: Twitch's player already shows its own message, so the
+  extension adds none.
+
 ### 2.1 Why *this part* is still muted
 
 Today a muted part only says "still muted". Each muted segment will carry a

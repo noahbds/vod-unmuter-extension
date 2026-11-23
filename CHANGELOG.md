@@ -1,8 +1,58 @@
 # Changelog
 
-## 1.3.0 (in progress)
+## 1.3.0 (in progress: not released yet)
+
+Phase 2, explanations and reliability:
+
+- **Why each part is still muted.** Hover a red part of the seek bar:
+  - "deleted in every quality (checked: Source, 720p60…)";
+  - "not checked one by one (old VOD)";
+  - "network problem, checked again automatically" (shown in yellow);
+  - "sound found but its timing didn't match";
+  - "saved copy unusable".
+
+  The panel's list shows a short version for each part.
+- **Why the whole VOD isn't unmuted.** The panel starts with a verdict, e.g.
+  "Twitch deleted the original sound of 205 parts: the stream ended 12 days
+  ago, and Twitch deletes it 13 to 32 hours after a stream". It comes with a
+  **Why?** link and an **Auto-save <channel>'s next VODs** button.
+- **"Not active" warning.** When Twitch shows muted parts but the extension
+  never heard from the player (usually another extension started it first),
+  the counter says **⚠ Not active**. Its panel has a reload button, a
+  diagnostic report button and a link to open an issue. It waits 8 s to avoid
+  false alarms (tested on 3 VODs, including a late mature-content gate).
+- **Diagnostic report.** **Copy diagnostic report** in the panel and the menu
+  copies a text for a GitHub issue:
+  - version, browser, settings;
+  - the VOD's result with reasons;
+  - each part of the extension's state;
+  - self-check;
+  - the last log lines.
+
+  No tokens, URLs shortened.
+- **Status in the menu.** "Status: OK" or the list of problems:
+  - restoring turned off;
+  - storage blocked or full;
+  - player not reached;
+  - auto-save errors.
+- **Console.** One logger with levels, lines prefixed
+  `[VOD Unmuter] · player:` / `· page:` / `· auto-save:`, and errors that
+  used to be silent are now logged. A **Debug logging** switch in the menu
+  shows every check, splice and save.
+- **First-run page** after installing. It explains the 13–32 hour limit, lets
+  you add auto-save channels, and covers what doesn't work (embedded players,
+  mobile site) and the Firefox storage note.
+- **Seek bar:** inside green (and red) parts, the part you've already watched
+  is drawn light, almost white, so you can see where you are. Twitch's
+  position marker stays on top.
 
 Phase 1, bug fixes:
+
+- **Counter flickering to another result when changing a setting** (e.g.
+  416/420 then 496/496). When another extension (such as TwitchNoSub) fetches
+  a VOD's playlist from the page, the extension's page copy checked that VOD a
+  second time and answered too. Only the copy that really plays the VOD
+  reports now, and the page copy no longer checks twice.
 
 - **Network errors no longer count as "deleted".** A timeout or server error
   used to make a part look deleted for good, and a part *played* during an

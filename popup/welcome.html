@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Welcome to Twitch VOD Unmuter</title>
+  <link rel="stylesheet" href="popup.css">
+  <link rel="stylesheet" href="welcome.css">
+</head>
+<body class="page">
+  <main>
+    <img src="../icons/icon-128.png" width="64" height="64" alt="">
+    <h1>Twitch VOD Unmuter is ready</h1>
+    <p class="lead">Open any Twitch VOD: muted parts play with their sound, as long as Twitch still has it.</p>
+
+    <h2>What it can and can't do</h2>
+    <ul>
+      <li><b>Twitch keeps the original sound of muted parts for only 13 to 32 hours after a stream ends</b>
+        (measured on 81 VODs), then deletes it for good. After that, nothing can bring it back,
+        except audio this extension saved before.</li>
+      <li>So <b>VODs opened within a day</b> of the stream are unmuted, and their sound is saved on this computer
+        so they stay unmuted later. Older VODs usually can't be unmuted.</li>
+      <li>The counter next to the player's ⚙️ and the seek bar colors show what was restored. Hover a red part
+        to see why it's still muted.</li>
+    </ul>
+
+    <h2>Don't miss the next VODs</h2>
+    <p>Add the channels you watch: their new VODs are saved in the background, while Twitch still has the
+      sound, even if you don't open them in time.</p>
+    <form id="addChannel" class="add">
+      <input id="channelInput" type="text" placeholder="Channel name or twitch.tv link" autocomplete="off" spellcheck="false" aria-label="Channel to auto-save">
+      <button type="submit">Add</button>
+    </form>
+    <p id="channelError" class="error" hidden></p>
+    <p id="channels" class="muted"></p>
+    <p class="muted small">Change this any time in the extension's menu (its icon in the toolbar).</p>
+
+    <h2>Good to know</h2>
+    <ul>
+      <li id="firefoxNote" hidden>In this browser, saved audio can't be compressed (no AAC encoder): it takes about
+        1.1 to 2.4 MB per muted minute. The storage limit is in the extension's menu.</li>
+      <li>VODs embedded in other websites and the mobile site (m.twitch.tv) can't be unmuted: Twitch only gives
+        the original sound to www.twitch.tv. The counter offers to open the VOD there.</li>
+      <li>Everything stays in your browser. No account, no server, no tracking.</li>
+      <li>Something wrong? The extension's menu has a status line and a <b>Copy diagnostic report</b> button
+        for a <a href="https://github.com/noahbds/vod-unmuter-extension/issues" target="_blank" rel="noopener">GitHub issue</a>.</li>
+    </ul>
+    <p><a href="https://github.com/noahbds/vod-unmuter-extension#readme" target="_blank" rel="noopener">Full guide</a> ·
+      <a href="https://github.com/noahbds/vod-unmuter-extension/blob/main/PRIVACY.md" target="_blank" rel="noopener">Privacy</a></p>
+  </main>
+  <script src="welcome.js"></script>
+</body>
+</html>

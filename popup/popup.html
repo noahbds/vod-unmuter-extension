@@ -134,6 +134,19 @@
     <p class="muted">Loading…</p>
   </div>
 
+  <h2 class="split">
+    <span>Troubleshooting</span>
+    <button type="button" id="copyDiag" title="Copy a report to paste in a GitHub issue">Copy diagnostic report</button>
+  </h2>
+  <p id="status" class="muted small" aria-live="polite">Status: checking…</p>
+  <label class="row">
+    <span>
+      <strong>Debug logging</strong>
+      <small>Every check, splice and save in the console (F12)</small>
+    </span>
+    <input type="checkbox" id="debug">
+  </label>
+
   <p class="note" id="note" hidden>Reload the VOD for this to take effect.</p>
 
   <script src="popup.js"></script>

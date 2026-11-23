@@ -48,9 +48,33 @@
     let ORIGIN = '';
     try { ORIGIN = scope.location.origin; } catch (e) { /* ignore */ }
     const RESTRICTED = /^https:\/\/(player|m)\.twitch\.tv$/.test(ORIGIN);
-    const log = (level, ...args) => {
-      try { (console[level === 'info' ? 'log' : level] || console.log)(`${TAG} [${WHERE}]`, ...args); } catch (e) { /* ignore */ }
+
+    // ---- logging -----------------------------------------------------------
+    // One logger for everything: levels error / warn / info / debug (debug
+    // only with the popup's "Debug logging" switch). The last 150 lines are
+    // kept in memory for the diagnostic report. URLs are shortened to their
+    // last path parts, without their query (no tokens).
+    const LOG_KEEP = 150;
+    const logLines = [];
+    const shortUrl = (text) => String(text).replace(/https?:\/\/[^\s"']+/g, (u) => {
+      const path = u.split(/[?#]/)[0].split('/').filter(Boolean);
+      return path.length > 3 ? '…/' + path.slice(-3).join('/') : path.slice(1).join('/') || u.split('?')[0];
+    });
+    const describeArg = (a) => {
+      if (a instanceof Error || (a && a.name && a.message)) return `${a.name}: ${a.message}`;
+      if (a && typeof a === 'object') { try { return JSON.stringify(a); } catch (e) { return String(a); } }
+      return String(a);
     };
+    function log(level, ...args) {
+      const where = typeof args[0] === 'string' && args[0].startsWith('@') ? args.shift().slice(1) : WHERE;
+      if (level === 'debug' && !(typeof settings !== 'undefined' && settings.debug)) return;
+      const text = shortUrl(args.map(describeArg).join(' '));
+      logLines.push({ t: Date.now(), where, level, text });
+      if (logLines.length > LOG_KEEP) logLines.shift();
+      try { (console[level === 'info' ? 'log' : level] || console.log)(`${TAG} · ${where}: ${text}`); } catch (e) { /* no console */ }
+    }
+    // Short name of a job for log lines: "<channel> · <quality>".
+    const jobName = (job) => `${job.vodKey.split('_').slice(1, -2).join('_') || job.vodKey.slice(0, 8)} · ${job.dir}`;
     const SUFFIXES = ['.ts', '-unmuted.ts']; // where the original audio can live
     const MUTED_RE = /^(.*?)(\d+)-muted\.ts(\?.*)?$/;
     const MAX_PARALLEL = 48;   // background checks (tiny requests, HTTP/2; measured: 14 s -> 10 s)
@@ -59,7 +83,7 @@
     const FALLBACK_DIRS = ['chunked', '1080p60', '1080p30', '720p60', '720p30', '480p30', '360p30', '160p30'];
 
     const realFetch = scope.fetch;
-    let settings = { enabled: true, saveAudio: true, saveMode: 'whole', keepDays: 60, saveQuality: 'high', maxStorageMB: 1000 };
+    let settings = { enabled: true, saveAudio: true, saveMode: 'whole', keepDays: 60, saveQuality: 'high', maxStorageMB: 1000, debug: false };
 
     let channel = null;
     try { channel = new BroadcastChannel(CHANNEL); } catch (e) { /* unsupported */ }
@@ -193,7 +217,7 @@
           };
           req.onsuccess = () => resolve(req.result);
           req.onerror = () => reject(req.error);
-        }).catch((e) => { console.warn(TAG, 'saving is unavailable (browser storage blocked)', e); return null; });
+        }).catch((e) => { log('warn', 'saving is unavailable: browser storage (IndexedDB) is blocked here, e.g. in a private window', e); return null; });
       }
       return dbPromise;
     }
@@ -304,7 +328,7 @@
             };
           }
         });
-      } catch (e) { /* only a speed-up: ignore */ }
+      } catch (e) { log('debug', 'could not remember deleted files (only a speed-up)', e); }
     }
 
     // Marks this job's known-deleted files before checking starts.
@@ -869,9 +893,11 @@
     async function resolveSegment(s) {
       s.unknown = false;
       setResult(s, await findOwn(s));
-      if (s.confirmed || s.source) return;
-      if (s.job.saved.has(s.num)) { setResult(s, 'saved'); return; }
-      setResult(s, await findDonor(s));
+      if (!s.confirmed && !s.source) {
+        if (s.job.saved.has(s.num)) setResult(s, 'saved');
+        else setResult(s, await findDonor(s));
+      }
+      log('debug', `${jobName(s.job)}: segment ${s.num}: ${s.source ? 'sound from ' + s.source : reasonOf(s)}`);
     }
 
     // ------------------------------------------------------------ reporting
@@ -890,18 +916,37 @@
       return { kind: backup ? 'other-backup' : 'other', quality: prettyQuality(seg.source.slice(0, slash)) };
     }
 
+    // Why a muted segment is (still) muted, for the UI and the logs:
+    //   'restored'  it isn't: its sound was found
+    //   'checking'  not checked yet
+    //   'network'   couldn't be checked (timeouts, server errors): retried
+    //   'skipped'   not checked one by one: old VOD, nothing left in a sample
+    //   'splice'    sound found but it didn't fit (timing): kept muted
+    //   'damaged'   the saved copy couldn't be used
+    //   'gone'      Twitch deleted the original in every quality
+    function reasonOf(seg) {
+      if (seg.source) return 'restored';
+      if (seg.reason) return seg.reason;
+      if (seg.unknown) return 'network';
+      if (seg.skippedCheck) return 'skipped';
+      if (seg.source === undefined) return 'checking';
+      return 'gone';
+    }
+
     function buildRanges(segs) {
       const ranges = [];
       let cur = null;
       for (const s of segs) {
         const restored = !!s.source;
+        const reason = reasonOf(s);
         const contiguous = cur && Math.abs(cur.end - s.start) < 0.5 && cur.restored === restored;
         if (!contiguous) {
-          cur = { start: s.start, end: s.start, segments: 0, restored, sources: new Map() };
+          cur = { start: s.start, end: s.start, segments: 0, restored, sources: new Map(), reasons: {} };
           ranges.push(cur);
         }
         cur.end = s.start + s.duration;
         cur.segments++;
+        if (!restored) cur.reasons[reason] = (cur.reasons[reason] || 0) + 1;
         if (s.source) {
           const d = describe(s);
           const k = d.kind + '|' + d.quality;
@@ -912,6 +957,7 @@
       return ranges.map((r) => ({
         start: r.start, end: r.end, segments: r.segments, restored: r.restored,
         sources: [...r.sources.values()].sort((a, b) => b.segments - a.segments),
+        reasons: r.reasons,
       }));
     }
 
@@ -920,13 +966,18 @@
     const jobs = [];
     let currentJob = null;
     let noneCurrent = false; // the player moved to a VOD with nothing muted
+    // In the player, a VOD whose playlist was just loaded counts as playing
+    // until segments say otherwise. The page copy only sees playlists that
+    // something else in the page fetched (e.g. another extension), so there a
+    // VOD counts only once its video is really downloaded from the page.
     const isCurrent = (job) => !job.auto &&
-      (currentJob || (noneCurrent ? null : jobs.filter((j) => !j.auto).pop())) === job;
+      (currentJob || (noneCurrent || IS_PAGE ? null : jobs.filter((j) => !j.auto).pop())) === job;
 
     // The player opened another VOD (Twitch changes pages without reloading).
     // `job` is that VOD's job, or null when it has nothing muted: tell the UI
     // to drop the previous VOD's counter and seek bar colors.
     function switchVod(vodBase, job) {
+      if (IS_PAGE) return; // the page copy doesn't play: playlists it sees say nothing about the player
       const before = currentJob || (noneCurrent ? null : jobs.filter((j) => !j.auto).pop());
       if (!before || before.vodBase === vodBase) return;
       post({ type: 'none', vod: before.vod });
@@ -967,7 +1018,10 @@
           type: 'result', key: job.key, vod: job.vod, vodKey: job.vodKey,
           quality: prettyQuality(job.dir), total: job.total,
           muted: job.segs.length, restored, fromOther, fromSaved, mutedSeconds, restoredSeconds,
-          skipped: job.skipped || 0, unknown, endedAt: job.endedAt || null, sampleSize: job.sample ? job.sample.size : 0,
+          skipped: job.skipped || 0, unknown,
+          reasons: job.segs.reduce((m, x) => { const r = reasonOf(x); m[r] = (m[r] || 0) + 1; return m; }, {}),
+          checkedQualities: allDirs(job).concat(allDirs(job).includes('audio_only') ? [] : ['audio_only']).map(prettyQuality),
+          channel: job.vodKey.split('_').slice(1, -2).join('_'), endedAt: job.endedAt || null, sampleSize: job.sample ? job.sample.size : 0,
           ranges: buildRanges(job.segs),
           save: {
             enabled: !!settings.saveAudio, mode: settings.saveMode,
@@ -1020,7 +1074,7 @@
         while (next < order.length) {
           if ((sample && job.skipRest) || job.paused) break;
           const s = order[next++];
-          try { await resolveSegment(s); } catch (e) { /* leave it muted */ }
+          try { await resolveSegment(s); } catch (e) { log('warn', `${jobName(job)}: checking segment ${s.num} failed`, e); }
           job.done++;
           if (s.source) job.found++;
           if (sample && sample.has(s)) {
@@ -1086,7 +1140,7 @@
         for (const s of job.segs) {
           if (s.source !== undefined || s.confirmed) continue;
           if (job.saved.has(s.num)) setResult(s, 'saved');
-          else { s.source = null; skipped++; }
+          else { s.source = null; s.skippedCheck = true; skipped++; }
         }
         job.skipped = skipped;
         job.done = job.segs.length;
@@ -1095,7 +1149,7 @@
       const restored = sendResult(job);
       const unknown = job.segs.filter((x) => !x.source && x.unknown).length;
       const gone = job.segs.length - restored - unknown;
-      log('info', `[${prettyQuality(job.dir)}] ${restored}/${job.segs.length} muted segments can be unmuted` +
+      log('info', `${jobName(job)}: ${restored}/${job.segs.length} muted segments can be unmuted` +
         (gone ? ` · ${gone} deleted in every quality` + (job.skipped ? ` (${job.skipped} not checked one by one: old VOD)` : '') : '') +
         (unknown ? ` · ${unknown} not checked yet (network problem, will retry)` : ''));
       if (isCurrent(job)) { maybeSaveAll(job); scheduleCompress(job); }
@@ -1145,7 +1199,7 @@
         if (total <= limit) break;
         await deleteSavedVod(v.vod);
         total -= v.bytes;
-        console.log(TAG, `storage limit: deleted the oldest saved VOD (${v.channel || v.vod})`);
+        log('info', `storage limit: deleted the oldest saved VOD (${v.channel || v.vod})`);
       }
       return total <= limit;
     }
@@ -1212,7 +1266,7 @@
               known.set(url, true);
               await saveFromBytes(seg, new Uint8Array(await r.arrayBuffer()));
               return;
-            } catch (e) { /* try the next one */ }
+            } catch (e) { log('debug', `${jobName(job)}: saving segment ${seg.num} from ${dir} failed, trying the next quality`, e); }
           }
         }
       })));
@@ -1299,7 +1353,7 @@
                 const data = await reencode(lead.length ? pcm.map((c) => c.subarray(0, skip)) : null,
                   pcm.map((c) => c.subarray(skip)), info, kbps, delay, frames.length);
                 if (data) next = { fmt: 'aac', type: 0x0f, pts: audio.pts, kbps, data };
-              } catch (e) { /* keep it lossless */ }
+              } catch (e) { log('warn', `${jobName(job)}: compressing segment ${num} failed, kept lossless`, e); }
               cache.num = num;
               cache.frames = frames;
             }
@@ -1375,10 +1429,11 @@
         out.bytes = job.savedBytes;
         out.limitReached = job.limitReached;
         out.ok = true;
-        console.log(TAG, `auto-save: VOD ${vodId}: ${out.saved}/${out.restorable} restorable muted segments saved`);
+        log('info', '@auto-save', `VOD ${vodId}: ${out.saved}/${out.restorable} restorable muted segments saved` +
+          (out.muted > out.restorable ? ` (${out.muted - out.restorable} already deleted by Twitch)` : ''));
       } catch (e) {
         out.error = (e && e.message) || String(e);
-        console.warn(TAG, `auto-save: VOD ${vodId}:`, out.error);
+        log('warn', '@auto-save', `VOD ${vodId}:`, out.error);
       } finally {
         // Forget it, so the next run starts fresh and memory is freed.
         if (job) {
@@ -1478,7 +1533,9 @@
       if (!job.auto) {
         const playing = currentJob && !currentJob.auto && currentJob.vodBase === vodBase ? currentJob
           : jobs.filter((j) => !j.auto && j.vodBase === vodBase).pop();
-        if (playing) job.paused = true;
+        // In the page copy, nothing is played yet either: don't check twice
+        // what the player's own copy checks.
+        if (playing || IS_PAGE) job.paused = true;
       }
       jobs.push(job);
       job.checked = checkAll(job);
@@ -1534,7 +1591,12 @@
           if (audio) {
             const { res, ok } = await spliced(seg, input, init, audio);
             if (ok) { confirm(seg, 'saved'); return res; }
-            if (res.ok) { confirm(seg, null); return res; }
+            if (res.ok) {
+              seg.reason = 'damaged';
+              log('warn', `${jobName(job)}: segment ${seg.num}: the saved copy couldn't be used, kept muted`);
+              confirm(seg, null);
+              return res;
+            }
           }
         } catch (e) {
           if (aborted()) throw e;
@@ -1559,7 +1621,12 @@
               if (settings.saveAudio && !job.noSave && !job.saved.has(seg.num)) saveFromBytes(seg, ob);
               return res;
             }
-            if (res.ok) { confirm(seg, null); return res; }
+            if (res.ok) {
+              seg.reason = 'splice';
+              log('warn', `${jobName(job)}: segment ${seg.num}: sound found in ${donor.split('/')[0]} but its timing didn't match, kept muted`);
+              confirm(seg, null);
+              return res;
+            }
           } else {
             if (!isMiss(other.status)) uncertain = true;
             try { other.body && other.body.cancel(); } catch (e) { /* ignore */ }
@@ -1614,9 +1681,24 @@
             for (const s of job.segs) if (s.source === 'saved') { s.source = null; s.confirmed = false; }
           }
           if (IS_PAGE) {
-            try { await deleteSavedVod(m.vodKey); } catch (e) { /* ignore */ }
+            try { await deleteSavedVod(m.vodKey); } catch (e) { log('warn', 'could not delete saved audio', e); }
           }
           for (const job of jobs) if (job.vodKey === m.vodKey && job.finished) sendResult(job);
+        } else if (m.type === 'diag-request' && m.id) {
+          // Diagnostic report (ui.js): this instance's log and self-check.
+          let idb = null;
+          try { idb = !!(await openDb()); } catch (e) { idb = false; }
+          post({
+            type: 'diag-reply', id: m.id, where: WHERE, origin: ORIGIN, logs: logLines.slice(-60),
+            info: {
+              idb, aac: aacSupported, restricted: RESTRICTED, storageFull,
+              jobs: jobs.map((j) => ({
+                name: jobName(j), auto: !!j.auto, current: isCurrent(j), paused: !!j.paused, finished: j.finished, live: !!j.live,
+                muted: j.segs.length, saved: j.saved.size, limitReached: !!j.limitReached,
+                reasons: j.segs.reduce((acc, x) => { const r = reasonOf(x); acc[r] = (acc[r] || 0) + 1; return acc; }, {}),
+              })),
+            },
+          });
         } else if (m.type === 'savedChanged' && m.vodKey) {
           // Audio was imported from a backup: use it for segments still muted.
           for (const job of jobs) {
@@ -1639,7 +1721,7 @@
           }
         }
       });
-      post({ type: 'hello' });
+      post({ type: 'hello', where: WHERE });
     }
 
     // ------------------------------------------------------------ fetch hook
@@ -1677,7 +1759,7 @@
         Object.defineProperty(out, 'url', { value: res.url });
         return out;
       } catch (e) {
-        console.warn(TAG, 'could not patch playlist', e);
+        log('error', 'could not rewrite the playlist: this VOD plays muted as usual', e);
         return res;
       }
     }
@@ -1800,6 +1882,9 @@
       if (relay) relay.postMessage({ type: 'deleteSaved', vodKey }); // live player state
       await store.remove(vodKey);
     };
+    if (request.action === 'diag') {
+      return window.__vodUnmuterDiag ? window.__vodUnmuterDiag() : { text: 'The extension\'s page script is not loaded.', problems: ['page script not loaded'] };
+    }
     if (request.action === 'autosave') {
       const auto = window.__vodUnmuterAuto;
       return auto ? auto.save(request.vodId) : { vodId: request.vodId, ok: false, error: 'unavailable' };

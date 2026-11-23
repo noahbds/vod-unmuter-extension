@@ -6,16 +6,29 @@
 (() => {
   'use strict';
   const api = globalThis.browser || globalThis.chrome;
-  const DEFAULTS = { enabled: true, badge: true, recolor: true, saveAudio: true, saveMode: 'whole', keepDays: 60, saveQuality: 'high', maxStorageMB: 1000 };
+  const DEFAULTS = { enabled: true, badge: true, recolor: true, saveAudio: true, saveMode: 'whole', keepDays: 60, saveQuality: 'high', maxStorageMB: 1000, debug: false, autoChannels: [] };
 
   async function send() {
     let settings = DEFAULTS;
     try { settings = await api.storage.sync.get(DEFAULTS); } catch (e) { /* use defaults */ }
-    window.postMessage({ source: 'vod-unmuter-bridge', settings }, location.origin);
+    let version = '';
+    try { version = api.runtime.getManifest().version; } catch (e) { /* ignore */ }
+    window.postMessage({ source: 'vod-unmuter-bridge', settings: Object.assign({}, settings, { version }) }, location.origin);
+  }
+
+  // The counter's panel offers to auto-save the channel of a VOD whose
+  // originals are already gone.
+  async function addAutoChannel(login) {
+    if (!/^[a-z0-9_]{2,25}$/.test(login)) return;
+    const { autoChannels } = await api.storage.sync.get({ autoChannels: [] });
+    if (!autoChannels.includes(login)) await api.storage.sync.set({ autoChannels: autoChannels.concat(login) });
+    try { await api.runtime.sendMessage({ vu: 'autoCheckNow' }); } catch (e) { /* background asleep */ }
   }
 
   window.addEventListener('message', (ev) => {
-    if (ev.source === window && ev.data && ev.data.source === 'vod-unmuter-page' && ev.data.type === 'getSettings') send();
+    if (ev.source !== window || !ev.data || ev.data.source !== 'vod-unmuter-page') return;
+    if (ev.data.type === 'getSettings') send();
+    if (ev.data.type === 'addAutoChannel' && typeof ev.data.login === 'string') addAutoChannel(ev.data.login.toLowerCase());
   });
   api.storage.onChanged.addListener((changes, area) => { if (area === 'sync') send(); });
   send();
@@ -47,7 +60,7 @@
 
     // Popup: list / delete saved audio.
     if (msg.vu === 'storage') {
-      askPage({ action: msg.action, vodKey: msg.vodKey }, 8000).then(sendResponse);
+      askPage({ action: msg.action, vodKey: msg.vodKey }, msg.action === 'diag' ? 4000 : 8000).then(sendResponse);
       return true; // answer asynchronously
     }
 

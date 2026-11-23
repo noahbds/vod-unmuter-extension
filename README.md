@@ -46,8 +46,8 @@ This creates, in `dist/`:
 |---|---|
 | `dist/chrome/` | Chrome, Edge, Brave, Opera: *Load unpacked* |
 | `dist/firefox/` | Firefox: *Load Temporary Add-on* |
-| `twitch-vod-unmuter-chrome-1.2.0.zip` | Upload to the Chrome Web Store |
-| `twitch-vod-unmuter-firefox-1.2.0.zip` | Upload to addons.mozilla.org (signing) |
+| `twitch-vod-unmuter-chrome-1.3.0.zip` | Upload to the Chrome Web Store |
+| `twitch-vod-unmuter-firefox-1.3.0.zip` | Upload to addons.mozilla.org (signing) |
 
 The two builds differ only in `manifest.json` (Chrome runs the background
 script as a service worker, Firefox as a background page).
@@ -105,13 +105,18 @@ instead of a minute or more (205 muted segments: 24.5 s → 7.9 s), and the
 panel says so. Any part you play is still checked at that moment.
 
 Hover the counter (or click it to keep it open) for:
+- a **verdict** when something is still muted, e.g. "Twitch deleted the
+  original sound of 205 parts: the stream ended 12 days ago…", with a
+  **Why?** link and a button to auto-save that channel's next VODs;
 - the quality you're watching and how many parts were unmuted,
 - how many used another quality or your saved copy,
 - the **saved on this computer** status, with a button to delete it,
 - the list of every muted part of the VOD.
 
-**Seek bar:** Twitch's red marks are replaced by **green** (sound restored) and
-**red** (still muted). Hover one to see its time, its length and **where its
+**Seek bar:** Twitch's red marks are replaced by **green** (sound restored),
+**red** (still muted) and **yellow** (not checked yet: network problem,
+retried automatically). The part you've already watched is drawn lighter.
+Hovering a red part tells **why** it's still muted. Hover one to see its time, its length and **where its
 sound comes from**:
 
 | Source | Meaning |
@@ -428,6 +433,18 @@ www.twitch.tv: from `player.twitch.tv` (VODs embedded in other websites) and
 `m.twitch.tv` they refuse it. Click the counter, then **Open on twitch.tv**.
 On a phone, use "Request desktop site". Saved audio is also kept per site, so
 it's only available on www.twitch.tv.
+
+**The counter says "⚠ Not active"**
+Twitch shows muted parts, but the extension couldn't get into Twitch's player.
+Reload the page. If it keeps happening, another extension is probably starting
+the player first: click **Copy diagnostic report** and open an issue.
+
+**Reporting a problem**
+The extension's menu shows a **Status** line (self-check) and has **Copy
+diagnostic report**. It copies the version, browser, settings, this VOD's
+result with reasons, and the last log lines (no tokens) to paste into a
+GitHub issue. **Debug logging** in the menu logs every check, splice and
+save to the console (F12).
 
 **Something looks broken after a Twitch update**
 Open the console (F12) and look for messages starting with `[VOD Unmuter]`. If

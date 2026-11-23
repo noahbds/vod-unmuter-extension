@@ -1,0 +1,11 @@
+body.page { width: auto; padding: 0 16px; font-size: 15px; line-height: 1.55; }
+.page main { max-width: 640px; margin: 0 auto; padding: 40px 0 64px; }
+.page h1 { font-size: 26px; margin: 12px 0 4px; }
+.page h2 { font-size: 17px; margin: 28px 0 8px; }
+.page .lead { font-size: 17px; color: var(--muted); margin: 0; }
+.page ul { padding-left: 20px; margin: 0; } .page li { margin: 6px 0; }
+.page a { color: var(--saved); }
+.page .add { display: flex; gap: 8px; max-width: 420px; }
+.page .add input { flex: 1; font: inherit; padding: 6px 10px; border-radius: 6px; border: 1px solid var(--line); background: var(--field); color: var(--fg); }
+.page .add button { font-size: 14px; padding: 6px 14px; }
+.page .small { font-size: 13px; }

@@ -25,7 +25,12 @@ const EMPTY_STATE = { vods: {}, channels: {}, lastRun: null, note: '' };
 function schedule() {
   api.alarms.create(ALARM, { periodInMinutes: EVERY_MINUTES, delayInMinutes: 1 });
 }
-api.runtime.onInstalled.addListener(schedule);
+api.runtime.onInstalled.addListener((details) => {
+  schedule();
+  // First install: explain what the extension can and can't do, before
+  // anyone is disappointed by an old VOD that stays muted.
+  if (details && details.reason === 'install') api.tabs.create({ url: api.runtime.getURL('popup/welcome.html') }).catch(() => {});
+});
 api.runtime.onStartup.addListener(schedule);
 api.alarms.onAlarm.addListener((alarm) => { if (alarm.name === ALARM) check(false); });
 

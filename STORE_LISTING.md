@@ -34,6 +34,23 @@ GOOD TO KNOW
 • Subscriber-only VODs work when you're logged in to Twitch with a subscribed account.
 • Twitch VOD Unmuter is not affiliated with or endorsed by Twitch.
 
+FAQ
+
+Why is this older VOD still muted?
+Twitch deletes the original sound of muted parts 13 to 32 hours after a stream ends. After that, only audio the extension saved before can restore it. Add the channels you watch to auto-save so their next VODs are saved in time. Hover a red part of the seek bar to see why it is still muted.
+
+Does it work with subscriber-only VODs?
+Yes, when you're logged in to Twitch with a subscribed account.
+
+Why does saving use more space in Firefox?
+Firefox can't compress audio to AAC, so saves stay lossless there (about 1.1 to 2.4 MB per muted minute instead of 0.75).
+
+Why doesn't it work on embedded players or the mobile site?
+Twitch only gives the original sound to www.twitch.tv. The counter offers to open the VOD there.
+
+Something is wrong?
+The extension's menu shows a status line and has a "Copy diagnostic report" button to paste in a GitHub issue.
+
 PRIVACY
 
 Everything stays in your browser. No account, no server, no analytics, no tracking. The extension only talks to Twitch. Privacy policy: https://github.com/noahbds/vod-unmuter-extension/blob/main/PRIVACY.md

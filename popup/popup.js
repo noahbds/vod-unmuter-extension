@@ -1,5 +1,5 @@
 const api = globalThis.browser || globalThis.chrome;
-const DEFAULTS = { enabled: true, badge: true, recolor: true, saveAudio: true, saveMode: 'whole', keepDays: 60, saveQuality: 'high', maxStorageMB: 1000, autoOpenTab: true };
+const DEFAULTS = { enabled: true, badge: true, recolor: true, saveAudio: true, saveMode: 'whole', keepDays: 60, saveQuality: 'high', maxStorageMB: 1000, autoOpenTab: true, debug: false };
 const NUMBERS = ['keepDays', 'maxStorageMB'];
 const TWITCH_TABS = ['https://www.twitch.tv/*', 'https://m.twitch.tv/*'];
 const $ = (id) => document.getElementById(id);
@@ -226,6 +226,54 @@ api.storage.onChanged.addListener((changes) => {
   if (changes.autoState || changes.autoChannels) renderChannels();
 });
 
+// ------------------------------------------------------------ troubleshooting
+// Self-check and diagnostic report: the page part comes from an open Twitch
+// tab (twitch.tv's storage, the player), the auto-save part from here.
+async function autoSaveReport() {
+  const { autoChannels } = await api.storage.sync.get({ autoChannels: [] });
+  const { autoState } = await api.storage.local.get({ autoState: { vods: {}, channels: {} } });
+  const problems = [];
+  const lines = [`- Auto-save: ${autoChannels.length} channel(s)` +
+    (autoState.lastRun ? `, last run ${new Date(autoState.lastRun).toISOString()}` : ', never run')];
+  for (const login of autoChannels) {
+    const ch = (autoState.channels || {})[login] || {};
+    if (ch.error) problems.push(`auto-save ${login}: ${ch.error}`);
+  }
+  for (const [id, v] of Object.entries(autoState.vods || {})) {
+    if (v.error) problems.push(`auto-save VOD ${id} (${v.channel}): ${v.error}`);
+    if (v.lastRun) lines.push(`  - VOD ${id} (${v.channel}): ${v.saved || 0}/${v.restorable || 0} saved of ${v.muted || 0} muted${v.error ? ', error: ' + v.error : ''}${v.limitReached ? ', limit reached' : ''}`);
+  }
+  if (autoState.note) problems.push(autoState.note);
+  return { lines, problems };
+}
+
+async function selfCheck() {
+  const [page, auto] = await Promise.all([ask('diag'), autoSaveReport()]);
+  const problems = [...((page && page.problems) || []), ...auto.problems];
+  let text = page && page.text ? page.text : `### VOD Unmuter diagnostic report\n- ${page && page.noTab ? 'No Twitch tab open' : 'Couldn\'t reach the Twitch tab'}`;
+  text = text.replace('\n\n```', '\n' + auto.lines.join('\n') + '\n\n```');
+  if (!text.includes('```')) text += '\n' + auto.lines.join('\n');
+  return { text, problems, notes: (page && page.notes) || [], noTab: page && page.noTab };
+}
+
+async function showStatus() {
+  const { problems, notes, noTab } = await selfCheck();
+  const el = $('status');
+  el.className = 'small ' + (problems.length ? 'status-bad' : 'muted');
+  el.textContent = problems.length
+    ? `Status: ${problems.length} problem${problems.length > 1 ? 's' : ''}: ${problems.join('; ')}`
+    : `Status: OK${noTab ? ' (open a Twitch tab for a full check)' : ''}` + (notes.length ? `. Note: ${notes.join('; ')}` : '');
+}
+
+$('copyDiag').addEventListener('click', async () => {
+  const b = $('copyDiag');
+  b.textContent = 'Preparing…';
+  const { text } = await selfCheck();
+  try { await navigator.clipboard.writeText(text); b.textContent = 'Copied ✓'; } catch (e) { b.textContent = 'Couldn\'t copy'; }
+  setTimeout(() => { b.textContent = 'Copy diagnostic report'; }, 3000);
+});
+
 loadSettings();
 loadSaved();
 renderChannels();
+showStatus();

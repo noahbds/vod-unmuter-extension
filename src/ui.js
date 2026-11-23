@@ -12,6 +12,10 @@
   let version = 0;      // bumped whenever state changes
   let vodId = currentVodId();
   let pinned = false;   // panel kept open by a click
+  let vodSince = Date.now();      // when this VOD page was opened
+  let playerHellos = 0;           // hook instances inside Twitch's player that said hello
+  const UNREACHABLE_AFTER_MS = 12000;
+  let mutedSeenSince = 0;         // since when Twitch shows muted parts without word from the player
 
   // ---------------------------------------------------------------- helpers
   function currentVodId() {
@@ -163,6 +167,169 @@
     await drawExport();
   }
 
+  // ------------------------------------------------------------ diagnostics
+  // A short text report for bug reports: version, browser, settings, this
+  // VOD's result and reasons, self-check, and the last log lines of every
+  // part of the extension (page, player). No login token, no history; URLs
+  // are already shortened by the logger.
+  function browserName() {
+    const ua = navigator.userAgent;
+    const m = ua.match(/Firefox\/([\d.]+)/) || ua.match(/Edg\/([\d.]+)/) || ua.match(/Chrome\/([\d.]+)/);
+    const name = /Firefox/.test(ua) ? 'Firefox' : /Edg\//.test(ua) ? 'Edge' : 'Chrome';
+    const os = /Mac OS X/.test(ua) ? 'macOS' : /Windows/.test(ua) ? 'Windows' : /Android/.test(ua) ? 'Android' : /Linux/.test(ua) ? 'Linux' : 'other';
+    return `${name} ${m ? m[1].split('.')[0] : '?'} (${os})`;
+  }
+
+  function collectReplies(timeoutMs) {
+    return new Promise((resolve) => {
+      const id = Math.random().toString(36).slice(2);
+      const replies = [];
+      const listen = (ev) => { if (ev.data && ev.data.type === 'diag-reply' && ev.data.id === id) replies.push(ev.data); };
+      const ch = new BroadcastChannel('vod-unmuter');
+      ch.addEventListener('message', listen);
+      ch.postMessage({ type: 'diag-request', id });
+      setTimeout(() => { ch.close(); resolve(replies); }, timeoutMs);
+    });
+  }
+
+  async function buildDiag() {
+    const replies = await collectReplies(700);
+    const player = replies.filter((r) => r.where === 'player');
+    const all = replies.map((r) => r.info);
+    const problems = [];
+    const notes = [];
+    if (!settings.enabled) problems.push('"Restore muted audio" is turned off');
+    if (all.some((i) => i.idb === false)) problems.push('browser storage (IndexedDB) is blocked here, e.g. a private window: nothing can be saved');
+    if (all.some((i) => i.storageFull)) problems.push('browser storage for twitch.tv is full: saving stopped');
+    if (state && state.type === 'unreachable') problems.push('couldn\'t reach Twitch\'s player on this page');
+    if (vodId && !player.length && !(state && state.type === 'restricted')) problems.push('the extension isn\'t running inside Twitch\'s player on this page');
+    if (all.some((i) => i.restricted)) notes.push('embedded player or mobile site: Twitch only gives the original sound to www.twitch.tv');
+    if (all.some((i) => i.aac === false)) notes.push('this browser can\'t compress saved audio (no AAC encoder): saves stay lossless');
+    const st = state || {};
+    const reasons = st.reasons ? Object.entries(st.reasons).map(([k, v]) => `${k} ${v}`).join(', ') : '';
+    const sv = st.save || {};
+    const lines = [
+      '### VOD Unmuter diagnostic report',
+      `- Version: ${settings.version || '?'} · ${browserName()} · ${new Date().toISOString()}`,
+      `- Page: ${location.hostname}${vodId ? ' · VOD ' + vodId : ''}`,
+      `- Settings: restore ${settings.enabled ? 'on' : 'off'}, saving ${settings.saveAudio ? 'on' : 'off'} (${settings.saveMode}, ${settings.saveQuality}, limit ${settings.maxStorageMB} MB, keep ${settings.keepDays} days), ` +
+        `counter ${settings.badge ? 'on' : 'off'}, green bar ${settings.recolor ? 'on' : 'off'}, debug ${settings.debug ? 'on' : 'off'}, ${(settings.autoChannels || []).length} auto-save channel(s)`,
+      st.type === 'result'
+        ? `- Result: ${st.quality} · ${st.restored}/${st.muted} unmuted · ${reasons}` + (st.endedAt ? ` · stream ended ${agoText(Date.now() - st.endedAt)}` : '') +
+          ` · saved ${sv.saved || 0}/${sv.savable || 0}` + (sv.limitReached ? ' (limit reached)' : '')
+        : `- State: ${st.type || 'nothing from the player yet'}`,
+      `- Extension parts answering: ${replies.map((r) => r.where).join(', ') || 'none'}`,
+      ...replies.flatMap((r) => r.info.jobs.map((j) => `  - ${r.where} job ${j.name}${j.auto ? ' (auto-save)' : ''}${j.current ? ' (playing)' : ''}${j.paused ? ' (paused)' : ''}: ` +
+        `${j.muted} muted, ${Object.entries(j.reasons).map(([k, v]) => `${k} ${v}`).join(', ')}, saved ${j.saved}`)),
+      `- Self-check: ${problems.length ? problems.join('; ') : 'OK'}` + (notes.length ? ` (notes: ${notes.join('; ')})` : ''),
+      '',
+      '```',
+      ...replies.flatMap((r) => r.logs).sort((a, b) => a.t - b.t).slice(-80)
+        .map((l) => `${new Date(l.t).toISOString().slice(11, 19)} ${l.level.padEnd(5)} ${l.where}: ${l.text}`),
+      '```',
+    ];
+    return { text: lines.join('\n'), problems, notes };
+  }
+  window.__vodUnmuterDiag = buildDiag;
+
+  async function copyText(text) {
+    try { await navigator.clipboard.writeText(text); return true; } catch (e) { /* fall back */ }
+    const ta = h('textarea', { style: 'position:fixed;opacity:0' });
+    ta.value = text;
+    document.body.append(ta);
+    ta.select();
+    let ok = false;
+    try { ok = document.execCommand('copy'); } catch (e) { ok = false; }
+    ta.remove();
+    return ok;
+  }
+
+  function diagButton() {
+    const b = h('button', {
+      class: 'vu-link', onclick: async (e) => {
+        e.stopPropagation();
+        b.textContent = 'Preparing…';
+        const { text } = await buildDiag();
+        b.textContent = (await copyText(text)) ? 'Copied ✓ paste it in a GitHub issue' : 'Couldn\'t copy (see console)';
+        if (b.textContent.startsWith('Couldn')) console.log(text);
+      },
+    }, 'Copy diagnostic report');
+    return b;
+  }
+
+  // ------------------------------------------------------------ explanations
+  const REPO = 'https://github.com/noahbds/vod-unmuter-extension';
+  const WHY_URL = REPO + '#how-long-twitch-keeps-the-original-audio';
+  const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
+  const endedAgo = (st) => (st.endedAt ? agoText(Date.now() - st.endedAt) : null);
+
+  // Short label of why a part is still muted (panel list).
+  const REASON_SHORT = {
+    gone: 'deleted by Twitch', skipped: 'deleted by Twitch', network: 'not checked yet',
+    splice: 'sound didn\'t fit', damaged: 'saved copy unusable', checking: 'checking…',
+  };
+  // Full explanation (seek bar tooltip).
+  function reasonText(reason, st) {
+    const ago = endedAgo(st);
+    switch (reason) {
+      case 'gone':
+        return `Twitch deleted the original sound here in every quality (checked: ${(st.checkedQualities || []).join(', ') || 'all'}).` +
+          (ago ? ` The stream ended ${ago}; Twitch deletes the originals 13 to 32 hours after a stream, and this part wasn't saved before that.` : '');
+      case 'skipped':
+        return `Not checked one by one: the stream ended ${ago || 'long ago'}, and none of ${st.sampleSize || 24} parts spread over the VOD still had its sound. ` +
+          'Twitch deletes the originals 13 to 32 hours after a stream. It is still checked if you play it.';
+      case 'network': return 'Twitch\'s video servers didn\'t answer when this part was checked. It is checked again automatically.';
+      case 'splice': return 'The original sound was found, but its timing didn\'t match the video, so it is kept muted to avoid a glitch.';
+      case 'damaged': return 'Your saved copy of this part couldn\'t be used, so it is kept muted.';
+      default: return 'Still being checked.';
+    }
+  }
+  const mainReason = (r) => Object.entries(r.reasons || {}).sort((a, b) => b[1] - a[1]).map((x) => x[0])[0] || 'gone';
+
+  // One or two lines on why the VOD isn't fully unmuted, most useful first.
+  function verdictLines(st) {
+    const r = st.reasons || {};
+    const lines = [];
+    const ago = endedAgo(st);
+    const hours = st.endedAt ? (Date.now() - st.endedAt) / 36e5 : null;
+    const gone = (r.gone || 0) + (r.skipped || 0);
+    if (r.network) lines.push({ tone: 'wait', text: `${plural(r.network, 'part')} couldn't be checked: Twitch's video servers didn't answer. They are checked again automatically.` });
+    if (gone) {
+      let text;
+      if (hours !== null && hours > 32) {
+        text = `Twitch deleted the original sound of ${plural(gone, 'part')}: the stream ended ${ago}, and Twitch deletes it 13 to 32 hours after a stream. Only audio saved before then can bring it back.`;
+      } else if (hours !== null) {
+        text = `Twitch has started deleting this VOD's original sound (the stream ended ${ago}): ${plural(gone, 'part')} are already gone in every quality.` +
+          (st.save && st.save.enabled ? ' The rest is being saved on this computer.' : '');
+      } else {
+        text = `Twitch deleted the original sound of ${plural(gone, 'part')} in every quality.`;
+      }
+      if (st.save && !st.save.enabled) text += ' Saving is off in the extension menu, so nothing is kept for later.';
+      const channelName = st.channel;
+      const followed = channelName && (settings.autoChannels || []).includes(channelName);
+      if (followed && settings.saveAudio) text += ` Auto-save is on for ${channelName}: its next VODs are saved in time.`;
+      const canSuggest = channelName && settings.saveAudio && !followed;
+      lines.push({ tone: 'bad', text, why: true, suggest: canSuggest ? channelName : null });
+    }
+    if (r.splice || r.damaged) lines.push({ tone: 'bad', text: `${plural((r.splice || 0) + (r.damaged || 0), 'part')} had sound that couldn't be used (see the list).` });
+    return lines;
+  }
+
+  function verdictBox(st) {
+    const lines = verdictLines(st);
+    if (!lines.length) return null;
+    return h('div', { class: 'vu-verdict' }, lines.map((l) => h('div', { class: 'vu-verdict-line vu-' + l.tone },
+      l.text,
+      l.why ? [' ', h('a', { class: 'vu-link', href: WHY_URL, target: '_blank', rel: 'noopener' }, 'Why?')] : null,
+      l.suggest ? h('div', null, h('button', {
+        class: 'vu-link', onclick: (e) => {
+          e.stopPropagation();
+          window.postMessage({ source: 'vod-unmuter-page', type: 'addAutoChannel', login: l.suggest }, location.origin);
+          e.target.replaceWith(h('span', { class: 'vu-ok-c' }, `✓ New VODs from ${l.suggest} will be saved in time (auto-save).`));
+        },
+      }, `Auto-save ${l.suggest}'s next VODs`)) : null)));
+  }
+
   function speakerIcon(on) {
     const NS = 'http://www.w3.org/2000/svg';
     const svg = document.createElementNS(NS, 'svg');
@@ -243,8 +410,17 @@
     html.vu-recolor .seekbar-segment[style*="212, 73, 73"] { opacity: 0 !important; }
     .vu-bars { position: absolute; inset: 0; pointer-events: none; z-index: 1; }
     .vu-bar { position: absolute; top: 0; bottom: 0; min-width: 2px; }
-    .vu-bar.vu-ok { background: rgba(34, 197, 94, 0.9); }
-    .vu-bar.vu-no { background: rgba(232, 72, 72, 0.85); }
+    .vu-bar.vu-ok { background: linear-gradient(90deg, #dcfce7 var(--vu-played, 0%), rgba(34, 197, 94, 0.9) var(--vu-played, 0%)); }
+    .vu-bar.vu-no { background: linear-gradient(90deg, #fde2e2 var(--vu-played, 0%), rgba(232, 72, 72, 0.85) var(--vu-played, 0%)); }
+    .vu-bar.vu-wait { background: linear-gradient(90deg, #fef3c7 var(--vu-played, 0%), rgba(250, 204, 21, 0.85) var(--vu-played, 0%)); }
+    /* Twitch's position marker stays above the colored parts */
+    html.vu-recolor .seekbar-bar > span:not(.seekbar-segment) { z-index: 2; }
+    .vu-verdict { margin: 0 0 10px; display: grid; gap: 6px; }
+    .vu-verdict-line { font-size: 12px; line-height: 1.45; padding: 6px 8px; border-radius: 6px; background: rgba(255, 255, 255, 0.06); }
+    .vu-verdict-line.vu-bad { border-left: 3px solid #e84848; }
+    .vu-verdict-line.vu-wait { border-left: 3px solid #facc15; }
+    .vu-verdict-line.vu-warn { border-left: 3px solid #facc15; }
+    a.vu-link { color: #bf94ff; text-decoration: none; } a.vu-link:hover { text-decoration: underline; }
 
     /* Button in the player's control bar, next to the settings gear. */
     .vu-ctrl {
@@ -367,6 +543,23 @@
       badge.classList.toggle('vu-open', pinned);
     };
 
+    if (state.type === 'unreachable') {
+      badge.append(h('button', { class: 'vu-btn', 'aria-haspopup': 'true', onclick: toggle,
+        'aria-label': 'VOD Unmuter is not active on this player' },
+        h('span', { class: 'vu-part-c' }, '⚠'), h('span', null, 'Not active')),
+      h('div', { class: 'vu-panel', onclick: (e) => e.stopPropagation() },
+        h('div', { class: 'vu-panel-inner' },
+          h('div', { class: 'vu-verdict-line vu-warn' },
+            'VOD Unmuter couldn\'t reach Twitch\'s player on this page, so muted parts stay muted. ' +
+            'Reload the page. If it keeps happening, another extension may be starting the player first: ' +
+            'copy the diagnostic report and open an issue on GitHub.'),
+          h('div', { style: 'display:flex;gap:14px;margin-top:8px' },
+            h('button', { class: 'vu-link', onclick: () => location.reload() }, 'Reload the page'),
+            diagButton(),
+            h('a', { class: 'vu-link', href: REPO + '/issues', target: '_blank', rel: 'noopener' }, 'Open an issue ↗')))));
+      return;
+    }
+
     if (state.type === 'restricted') {
       const open = () => {
         const v = document.querySelector('video');
@@ -410,6 +603,7 @@
 
     const panel = h('div', { class: 'vu-panel', onclick: (e) => e.stopPropagation() },
       h('div', { class: 'vu-panel-inner' },
+        verdictBox(state),
         h('div', { class: 'vu-stats' },
           state.quality ? [h('span', null, 'Quality'), h('span', null, state.quality)] : null,
           h('span', null, 'Muted segments'), h('span', null, muted),
@@ -421,21 +615,18 @@
           h('span', null, 'Audio restored'), h('span', null, `${span(state.restoredSeconds)} / ${span(state.mutedSeconds)}`)),
         h('div', { class: 'vu-meter', title: `${pct}% of the muted time restored` },
           h('div', { style: `width:${pct}%` })),
-        state.skipped ? h('div', { class: 'vu-note' },
-          `The stream ended ${agoText(Date.now() - state.endedAt)}, and none of ${state.sampleSize} segments ` +
-          'spread over the VOD still had its sound, so the others weren\'t checked one by one: Twitch deletes ' +
-          'the original sound 13 to 32 hours after a stream. Any part you play is still checked.') : null,
         savedSection(),
         h('div', { class: 'vu-list-title' }, 'Muted parts of this VOD'),
         state.ranges.map((r) => h('div', { class: 'vu-row' },
           h('span', { class: 'vu-dot', style: `background:${!r.restored ? '#e84848' : (r.sources || []).every((x) => x.kind === 'saved') ? '#a970ff' : '#22c55e'}` }),
           h('span', null, `${clock(r.start)} – ${clock(r.end)}`),
-          h('span', { class: 'vu-len' }, r.restored ? span(r.end - r.start) : 'still muted',
+          h('span', { class: 'vu-len' }, r.restored ? span(r.end - r.start) : REASON_SHORT[mainReason(r)] || 'still muted',
             viaText(r)))),
         restored < muted
           ? h('div', { class: 'vu-sub', style: 'margin-top:8px' },
-              'Red parts can\'t be restored: Twitch deleted the original audio in every quality.')
-          : null));
+              'Hover a red part of the seek bar to see why it is still muted.')
+          : null,
+        h('div', { style: 'margin-top:8px' }, diagButton())));
 
     badge.append(button, panel);
   }
@@ -491,12 +682,35 @@
   }
 
   function renderBars() {
-    if (barsVersion === version) return;
-    barsVersion = version;
-    bars.replaceChildren(...state.ranges.map((r) => h('span', {
-      class: `vu-bar ${r.restored ? 'vu-ok' : 'vu-no'}`,
-      style: `inset-inline-start:${(r.start / state.total) * 100}%;width:${((r.end - r.start) / state.total) * 100}%`,
-    })));
+    if (barsVersion !== version) {
+      barsVersion = version;
+      bars.replaceChildren(...state.ranges.map((r) => {
+        const el = h('span', {
+          class: `vu-bar ${r.restored ? 'vu-ok' : ['network', 'checking'].includes(mainReason(r)) ? 'vu-wait' : 'vu-no'}`,
+          style: `inset-inline-start:${(r.start / state.total) * 100}%;width:${((r.end - r.start) / state.total) * 100}%`,
+        });
+        el.vuFrom = (r.start / state.total) * 100;
+        el.vuTo = (r.end / state.total) * 100;
+        return el;
+      }));
+    }
+    paintPlayed();
+  }
+
+  // The colored parts cover Twitch's purple "already watched" fill, so the
+  // watched part of each one is drawn lighter (almost white) instead.
+  function playedPercent() {
+    const fill = document.querySelector('.seekbar-bar .seekbar-segment[style*="169, 112, 255"]');
+    if (fill) { const w = parseFloat(fill.style.width); if (w >= 0) return w; }
+    const v = document.querySelector('video');
+    return v && state && state.total ? (v.currentTime / state.total) * 100 : 0;
+  }
+  function paintPlayed() {
+    const p = playedPercent();
+    for (const el of bars.children) {
+      const f = Math.max(0, Math.min(1, (p - el.vuFrom) / ((el.vuTo - el.vuFrom) || 1))) * 100;
+      el.style.setProperty('--vu-played', f.toFixed(2) + '%');
+    }
   }
 
   // "· via 720p60" when part of a range's sound comes from another quality.
@@ -531,9 +745,23 @@
   // ------------------------------------------------------------------ update
   function update() {
     const id = currentVodId();
-    if (id !== vodId) { vodId = id; state = null; version++; }
+    if (id !== vodId) { vodId = id; state = null; version++; vodSince = Date.now(); }
 
     const player = findPlayer();
+    // Twitch shows muted parts (red marks on its seek bar, or its "audio for
+    // portions of this video has been muted" notice) but nothing came
+    // from the extension inside the player: it couldn't hook the player.
+    // It has to last 8 s: Twitch's notice can show a moment before the
+    // extension's first message (e.g. after the mature-content gate).
+    const twitchShowsMuted = !state && vodId && player && settings.enabled &&
+      (player.querySelector('.seekbar-segment[style*="212, 73, 73"]') ||
+       document.querySelector('[data-test-selector^="muted-segments-alert"]'));
+    if (!twitchShowsMuted) mutedSeenSince = 0;
+    else if (!mutedSeenSince) mutedSeenSince = Date.now();
+    else if (Date.now() - mutedSeenSince > 8000 && Date.now() - vodSince > UNREACHABLE_AFTER_MS) {
+      state = { type: 'unreachable', vod: null };
+      version++;
+    }
     const show = !!(state && vodId && player);
 
     if (show && settings.badge) {
@@ -593,8 +821,9 @@
                    sources.length > 1 ? `${plural(src.segments)}: ${d.name}` : d.name),
                  d.why ? h('div', { class: 'vu-src-why' }, d.why) : null));
            })]
-        : h('div', { class: 'vu-src-why', style: 'margin-top:4px' },
-            'Twitch deleted the original sound here in every quality, so there is nothing left to restore.'),
+        : Object.entries(hit.reasons || { gone: hit.segments }).sort((a, b) => b[1] - a[1]).map(([reason, n], i, all) =>
+            h('div', { class: 'vu-src-why', style: 'margin-top:4px' },
+              all.length > 1 ? h('b', null, `${plural(n, 'segment')}: `) : null, reasonText(reason, state))),
     ].flat(Infinity));
 
     if (tip.parentNode !== player) player.append(tip);
@@ -624,8 +853,10 @@
   channel.addEventListener('message', (ev) => {
     const m = ev.data;
     if (!m) return;
+    if (m.type === 'hello' && m.where === 'player') { playerHellos++; return; }
     if (m.type === 'settings') {
       settings = Object.assign({}, settings, m.settings);
+      version++;
     } else if (m.type === 'checking') {
       if (state && state.type === 'result' && state.key === m.key) return;
       state = m; version++;
@@ -644,4 +875,9 @@
   channel.postMessage({ type: 'hello' });
 
   setInterval(update, 700);
+  // Keep the watched part in step with playback (media events don't bubble,
+  // but they do pass through the document in the capture phase).
+  for (const type of ['timeupdate', 'seeked']) {
+    document.addEventListener(type, () => { if (bars.isConnected && state && state.ranges) paintPlayed(); }, true);
+  }
 })();
