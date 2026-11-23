@@ -62,7 +62,7 @@ script as a service worker, Firefox as a background page).
 After you change the files, run `node build.mjs` again, click the reload ↻
 icon on the extension, then reload your Twitch tabs.
 
-### Firefox (128 or newer)
+### Firefox (140 or newer)
 
 1. Open `about:debugging#/runtime/this-firefox`.
 2. Click **Load Temporary Add-on…** and select `dist/firefox/manifest.json`.
@@ -72,6 +72,22 @@ sign it through [addons.mozilla.org](https://addons.mozilla.org/developers/)
 as an *unlisted* add-on (free, private, nothing is published), or use Firefox
 Developer Edition / Nightly with `xpinstall.signatures.required` set to
 `false` in `about:config`.
+
+### Developing
+
+`npm install` (once) gets Mozilla's [web-ext](https://github.com/mozilla/web-ext)
+tool, then:
+
+```bash
+npm run start:firefox   # build, then open Firefox with the extension loaded
+npm run start:chrome    # same in Chrome
+npm run lint            # build, then Mozilla's add-on linter on dist/firefox
+```
+
+The browser reloads the extension whenever `dist/` changes: after editing
+`src/`, run `npm run build`. Settings for web-ext are in `web-ext-config.mjs`.
+GitHub Actions builds and lints every push and pull request
+(`.github/workflows/build.yml`) and keeps the zips as a download.
 
 ---
 
@@ -513,13 +529,15 @@ console (page or player) that the test doesn't expect. See
 
 ```
 CHANGELOG.md           What changed in each version
-PLAN-1.4.md            Work plan for 1.4: splitting src/hook.js into modules
 RELEASE.md             Release checklist
 test/                  Browser tests (run.cjs), Twitch change detector
                        (twitch-check.cjs), unit tests (unit/), test fixtures
 build.mjs              Builds dist/ for Chrome and Firefox (folders + zips):
                        puts src/hook.js together from its modules, checks it
 manifest.json          Extension manifest (Manifest V3, Chrome + Firefox)
+package.json           npm scripts (build, lint, start:*, tests) and web-ext
+web-ext-config.mjs     web-ext settings (lint, run)
+.github/workflows/     CI: build and lint on every push and pull request
 src/hook.js            Runs in the page and in the player's worker. A template:
                        the build replaces its "// @include" lines with:
   shared/              constants, shared state, logging

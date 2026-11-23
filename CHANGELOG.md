@@ -41,6 +41,11 @@ Fix: **with the browser's storage full, the console got a warning every
 second** while watching (the extension couldn't save how far you got).
 "Storage is full" is now said once, as for saving.
 
+**Firefox 140 or newer** is now needed (Firefox for Android: 142), up from
+128: the add-on's "collects no data" declaration, which addons.mozilla.org
+asks for, only exists from those versions. Firefox 128 ESR is no longer
+supported by Mozilla.
+
 Behind the scenes:
 - **`src/hook.js` (2,100 lines) is split into 20 modules** by what they do:
   `shared` (constants, state, logging), `media` (MPEG-TS, ADTS,
@@ -67,6 +72,10 @@ Behind the scenes:
 - `README.md`: the new layout, reading the console, unit tests.
   `STORE_LISTING.md`: the reviewer notes explain the build.
   `RELEASE.md`: unit tests are a release step.
+- **Repo setup:** a root `package.json` with npm scripts (`build`, `lint`,
+  `start:firefox`, `start:chrome`, the tests) using Mozilla's `web-ext`, a
+  GitHub Actions check that builds and lints every push and pull request,
+  `.editorconfig`, `.nvmrc`, LF line endings, and a wider `.gitignore`.
 
 ## 1.3.0 (in progress: not released yet)
 

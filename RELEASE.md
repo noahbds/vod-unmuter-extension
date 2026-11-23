@@ -4,7 +4,8 @@ Do these in order for every version.
 
 ## When work on a version starts
 
-- [ ] Bump `"version"` in `manifest.json` and the zip names in `README.md`.
+- [ ] Bump `"version"` in `manifest.json` and `package.json`, and the zip
+      names in `README.md`.
 - [ ] Add a `## x.y.z (in progress: not released yet)` section to
       `CHANGELOG.md`.
 
@@ -40,8 +41,7 @@ Do these in order for every version.
 4. **Build and lint:**
 
    ```bash
-   node build.mjs
-   npx web-ext lint --source-dir dist/firefox
+   npm install && npm run check-version && npm run lint
    ```
 
    0 errors and 0 warnings expected.

@@ -1,5 +1,20 @@
+# Build output (node build.mjs, web-ext)
 dist/
-.DS_Store
-test/node_modules/
-test/.cache/
+web-ext-artifacts/
+*.zip
+*.xpi
+*.crx
+*.pem
+
+# Dependencies
+node_modules/
+
+# Local only: browser tests use live Twitch VODs (see README "Testing")
 /test
+
+# OS and editor files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.log
