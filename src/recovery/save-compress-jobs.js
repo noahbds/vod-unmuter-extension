@@ -11,6 +11,7 @@ import { markMissing } from '../storage/gone-cache.js';
 import { deleteSavedSegment, loadRecord, loadSaved, makeRoom, putRecord, recordToAudio } from '../storage/saved-audio.js';
 import { saveDirs, saveLimited, urlFor } from './probe-resolver.js';
 import { jobOf, jobs, scheduleResult, sendResult } from './recovery-state.js';
+import { noteVodTotals } from './scan-scheduler.js';
 
 // "Parts ahead of me" mode: removes the saved copies of the parts behind
 // the furthest position reached in this VOD, and of `watched` parts.
@@ -39,6 +40,10 @@ export function noteSaved(job, info) {
     j.savedBytes = info.bytes;
     j.savedAt = info.savedAt;
   }
+  // The VOD's record was just created by this save, after its check had
+  // finished (when nothing was saved yet, the check had no record to put
+  // its totals in): add them now, so the menu says "182 / 204 parts".
+  if (job.finished && info.muted === undefined) noteVodTotals(job);
   if (job.finished) scheduleResult(job);
 }
 

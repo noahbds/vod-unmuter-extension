@@ -2,46 +2,71 @@
 
 ## 1.4.0 (in progress: not released yet)
 
-No change in what the extension does: this version reorganizes its code.
+Clearer logs, two fixes, and the code reorganized underneath (nothing else
+changes in what the extension does).
 
-**Clearer logs.** Every line names the VOD by channel, stream day and
-quality ("squeezie 2026-11-22 · Source") and a muted part by its place in
-the video ("part 242 (40:20–40:30)"), behind a purple `[VOD Unmuter]` badge.
-- The end of a check is one line: what can be unmuted and from where, the
-  muted time, the stretches that stay muted, how long it took. With *Debug
-  logging* it opens (a collapsed group) on every part, in VOD order:
-  neighbours with the same result share a line, and each file asked shows
-  Twitch's answer (`200`, `404`, `503`, "remembered"). It also says when the
-  time went to waiting for a free request slot rather than to Twitch.
-- New lines: when checking starts; each muted part the player plays, and how
-  (Debug logging); what was saved, from which quality, how many MB, and why
-  any part wasn't; what compression freed; settings changes; deletions;
-  backup files made and read.
-- The auto-save timer logs each run in its own console: each channel's
-  recent VODs and why each one is or isn't saved now, which tab is used, and
+**Clearer logs** (console, F12). Every line has a purple `[VOD Unmuter]`
+badge, says where it comes from (`page`, `player`, `auto-save`, `bridge`,
+`background`), names the VOD by channel, stream day and quality ("squeezie
+2026-11-22 · Source"), and a muted part by its place in the video ("part 242
+(40:20–40:30)"). Type `VOD Unmuter` in the console's filter box to see only
+these lines.
+- **The end of a check** is one line: how many muted parts can be unmuted and
+  from where, the muted time, the stretches that stay muted ("53:04–54:25 (8
+  parts), …") and how long it took. With *Debug logging*, click it to open
+  every part, in VOD order. Neighbours with the same result share a line, and
+  each file asked shows Twitch's answer (`200` found, `403`/`404` deleted,
+  `503` or "network error": asked again later, "remembered": no request
+  needed). It also says when the time went to waiting for a free request slot
+  rather than to Twitch.
+- **New lines:** when checking starts. Each muted part the player plays, and
+  how (*Debug logging*). What was saved, from which quality, how many MB, and
+  why any part wasn't. What compression freed. Retries and their result.
+  Settings changes, deletions, and backup files made and read.
+- **Auto-save** logs each run in the background's own console (Chrome:
+  `chrome://extensions`, "service worker"; Firefox: `about:debugging`,
+  Inspect). It shows each channel's recent VODs and why each one is or isn't
+  saved now ("tried 0.2 h ago, again after 15 min"), which tab is used, and
   the result per VOD.
-- Errors are also passed to the console as they are, so their stack can be
-  expanded. Warnings say which VOD and part they are about.
+- **Warnings** say which VOD and part they are about, and errors can be
+  expanded to see where they happened.
 
-`src/hook.js` (2,100 lines) is split into 20 modules by what they do
-(`src/shared`, `src/media`, `src/storage`, `src/recovery`, `src/player`,
-`src/messaging`). `node build.mjs` puts them back into one plain
-`src/hook.js` (no dependencies, nothing minified), then checks it: every
-module imports what it uses from another, nothing is declared twice, and the
-built file is started in a fake page and a fake player worker that have
-nothing else in them.
+Fix: **the menu's saved list said "258 parts" instead of "258 / 1174
+parts"** (and didn't say why the rest wasn't saved) when nothing had been
+saved yet by the time the VOD's check ended, e.g. a VOD whose first muted part
+is far from where you start watching. The totals are now added as soon as the
+first part is saved.
 
-The player worker's copy of the hook no longer includes the code only the
-page uses (backup files, auto-save): about 8% less code injected into
-Twitch's player (84 KB instead of 91 KB).
+Fix: **with the browser's storage full, the console got a warning every
+second** while watching (the extension couldn't save how far you got).
+"Storage is full" is now said once, as for saving.
 
-New unit tests (`cd test && npm run test:unit`, no browser, under a second):
-MPEG-TS parsing and splicing, ADTS ↔ TS round trips, saved audio totals,
-backup files (export, import, damaged files), storage full, which qualities
-are tried in which order, the seek bar's ranges, and the built hook run in
-the fake page and worker (playlist rewriting, own file, another quality
-spliced in). A test also checks that the five places with default settings
-agree.
+Behind the scenes:
+- **`src/hook.js` (2,100 lines) is split into 20 modules** by what they do:
+  `shared` (constants, state, logging), `media` (MPEG-TS, ADTS,
+  compression), `storage` (IndexedDB, deleted-files cache, backups),
+  `recovery` (checking, what the UI is told, saving, auto-save), `player`
+  (playlists, segments, messages, getting into the player's worker),
+  `messaging` (the page's side of `bridge.js`). `node build.mjs` still needs
+  no dependencies. It puts them back into one plain `src/hook.js` (nothing
+  minified or renamed, a banner before each module) and checks the result:
+  every module imports what it uses, nothing is declared twice, nothing a
+  module imports is changed elsewhere, the player's copy uses no page-only
+  code, and the built file runs in a fake page and a fake player worker that
+  have nothing else in them.
+- **Less code in Twitch's player:** its copy of the hook leaves out what only
+  the page uses (backup files, auto-save): 84 KB instead of 91 KB.
+- **Unit tests** (`cd test && npm run test:unit`: 60 tests, no browser, under
+  a second, Node 22+). They cover MPEG-TS parsing and splicing (33-bit
+  timestamps, PID and continuity-counter renumbering, timing checks), ADTS ↔
+  TS round trips, saved audio totals, backup files (export, import, damaged
+  files), storage full, which qualities are tried in which order, the seek
+  bar's ranges, the log lines, and the built hook in the fake page and worker
+  (playlist rewriting, the original file, another quality's sound spliced
+  in). A test also checks that the five places with default settings agree.
+- `README.md`: the new layout, reading the console, unit tests.
+  `STORE_LISTING.md`: the reviewer notes explain the build.
+  `RELEASE.md`: unit tests are a release step.
 
 ## 1.3.0 (in progress: not released yet)
 
