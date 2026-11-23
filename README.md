@@ -430,6 +430,9 @@ the player stops loading, turn off *Restore muted audio* and reload.
 ## Project files
 
 ```
+CHANGELOG.md           What changed in each version
+PLAN-1.3.md            Work plan for 1.3: bug fixes, reliability, features, tests
+ROADMAP.md             Later ideas, and ideas considered but not planned
 build.mjs              Builds dist/ for Chrome and Firefox (folders + zips)
 manifest.json          Extension manifest (Manifest V3, Chrome + Firefox)
 src/hook.js            Runs in the page and in the player's worker: playlists,
