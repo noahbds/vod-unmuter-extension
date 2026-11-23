@@ -38,6 +38,19 @@
     const TAG = '[VOD Unmuter]';
     const CHANNEL = 'vod-unmuter';
     const IS_PAGE = typeof scope.document !== 'undefined'; // vs. the player worker
+    const WHERE = IS_PAGE ? 'page' : 'player';
+    // Twitch's video servers refuse the original files of muted parts (403)
+    // to requests from the embedded player and the mobile site, while serving
+    // them to www.twitch.tv (measured: same file, only the Origin differs).
+    // Pages can't change their Origin, so there the extension doesn't check
+    // anything (it would wrongly find everything "deleted"); it tells the user
+    // to open the VOD on www.twitch.tv instead.
+    let ORIGIN = '';
+    try { ORIGIN = scope.location.origin; } catch (e) { /* ignore */ }
+    const RESTRICTED = /^https:\/\/(player|m)\.twitch\.tv$/.test(ORIGIN);
+    const log = (level, ...args) => {
+      try { (console[level === 'info' ? 'log' : level] || console.log)(`${TAG} [${WHERE}]`, ...args); } catch (e) { /* ignore */ }
+    };
     const SUFFIXES = ['.ts', '-unmuted.ts']; // where the original audio can live
     const MUTED_RE = /^(.*?)(\d+)-muted\.ts(\?.*)?$/;
     const MAX_PARALLEL = 48;   // background checks (tiny requests, HTTP/2; measured: 14 s -> 10 s)
@@ -472,10 +485,18 @@
           };
         });
       } catch (e) {
-        console.warn(TAG, 'could not save audio (storage full?)', e);
+        if (e && e.name === 'QuotaExceededError') {
+          // The browser's storage for twitch.tv is full (disk nearly full, or
+          // the browser's own limit): stop saving instead of failing on every
+          // segment, and say so in the panel.
+          if (!storageFull) log('warn', 'browser storage for twitch.tv is full: saving stopped', e);
+          storageFull = true;
+          for (const j of jobs) if (j.vodKey === vod) { j.limitReached = true; j.storageFull = true; scheduleResult(j); }
+        } else log('warn', 'could not save audio', e);
         return null;
       }
     }
+    let storageFull = false;
 
     // ---- re-encoding (saving step 2, "High" / "Small" quality) --------------
     // Uses WebCodecs. Each segment is encoded with the end of the previous
@@ -485,6 +506,15 @@
     const KBPS = { high: 96, small: 64 };
     const delays = new Map(); // "rate|channels|kbps" -> encoder delay in samples, or null
     const codecsAvailable = () => typeof scope.AudioEncoder === 'function' && typeof scope.AudioDecoder === 'function';
+    // Can this browser make AAC at all? (Firefox can't.) Told to the UI, so it
+    // doesn't promise compressed saves that won't happen.
+    let aacSupported = null;
+    (async () => {
+      try {
+        aacSupported = codecsAvailable() && !!(await scope.AudioEncoder.isConfigSupported({
+          codec: 'mp4a.40.2', sampleRate: 48000, numberOfChannels: 2, bitrate: 96000, aac: { format: 'adts' } })).supported;
+      } catch (e) { aacSupported = false; }
+    })();
 
     async function decodeFrames(frames, info) {
       const out = Array.from({ length: info.channels }, () => []);
@@ -567,7 +597,7 @@
         }
       } catch (e) { delay = null; }
       delays.set(key, delay);
-      if (delay === null) console.log(TAG, 'this browser cannot re-encode AAC: saved audio stays lossless');
+      if (delay === null) log('info', 'this browser has no AAC encoder: saved audio stays lossless (1.1 to 2.4 MB per muted minute)');
       return delay;
     }
 
@@ -770,7 +800,9 @@
         } catch (e) { ctrl.abort(); /* network hiccup: retry */ }
         await sleep(300 * (attempt + 1));
       }
-      return false;
+      // Timeouts and server errors (5xx) don't mean the file was deleted:
+      // answer "unknown", never remembered, so it is asked again later.
+      return null;
     }
 
     // urgent = the player is waiting for it: skip the background queue.
@@ -807,12 +839,22 @@
       return seg.job.vodBase + source.slice(0, slash) + '/' + seg.num + source.slice(slash + 1) + seg.query;
     }
 
+    // Both return the first source found, or null. `seg.unknown` is set when
+    // a file couldn't be checked (network problem), so "not found" isn't sure.
     async function findOwn(seg) {
-      for (const sfx of SUFFIXES) if (await probe(urlFor(seg, sfx))) return sfx;
+      for (const sfx of SUFFIXES) {
+        const found = await probe(urlFor(seg, sfx));
+        if (found) return sfx;
+        if (found === null) seg.unknown = true;
+      }
       return null;
     }
     async function findDonor(seg, dirs) {
-      for (const source of donorSources(seg, dirs)) if (await probe(urlFor(seg, source))) return source;
+      for (const source of donorSources(seg, dirs)) {
+        const found = await probe(urlFor(seg, source));
+        if (found) return source;
+        if (found === null) seg.unknown = true;
+      }
       return null;
     }
 
@@ -825,6 +867,7 @@
     // ones), so guessing from a few segments was wrong on real VODs.
     // Order: same quality, saved copy, other qualities.
     async function resolveSegment(s) {
+      s.unknown = false;
       setResult(s, await findOwn(s));
       if (s.confirmed || s.source) return;
       if (s.job.saved.has(s.num)) { setResult(s, 'saved'); return; }
@@ -887,17 +930,18 @@
       const before = currentJob || (noneCurrent ? null : jobs.filter((j) => !j.auto).pop());
       if (!before || before.vodBase === vodBase) return;
       post({ type: 'none', vod: before.vod });
-      currentJob = job;
-      noneCurrent = !job;
-      if (job) sendState(job);
+      if (job) { makeCurrent(job); sendState(job); } else { currentJob = null; noneCurrent = true; }
     }
 
+    // Called for the player's requests: the quality whose segments it
+    // downloads is the one being played (playlists alone don't count: the
+    // player may load several when adapting quality).
     function noteActivity(url) {
+      if (!/\.ts(\?|$)/.test(url)) return;
       for (const job of jobs) {
         if (url.startsWith(job.base)) {
           if (currentJob !== job) {
-            currentJob = job;
-            noneCurrent = false;
+            makeCurrent(job);
             sendState(job);
             maybeSaveAll(job);
           }
@@ -907,10 +951,11 @@
     }
 
     function sendResult(job) {
-      let restored = 0, fromOther = 0, fromSaved = 0, mutedSeconds = 0, restoredSeconds = 0, saved = 0;
+      let restored = 0, fromOther = 0, fromSaved = 0, mutedSeconds = 0, restoredSeconds = 0, saved = 0, unknown = 0;
       for (const s of job.segs) {
         mutedSeconds += s.duration;
         if (job.saved.has(s.num)) saved++;
+        if (!s.source && s.unknown) unknown++;
         if (!s.source) continue;
         restored++;
         restoredSeconds += s.duration;
@@ -922,13 +967,13 @@
           type: 'result', key: job.key, vod: job.vod, vodKey: job.vodKey,
           quality: prettyQuality(job.dir), total: job.total,
           muted: job.segs.length, restored, fromOther, fromSaved, mutedSeconds, restoredSeconds,
-          skipped: job.skipped || 0, endedAt: job.endedAt || null, sampleSize: job.sample ? job.sample.size : 0,
+          skipped: job.skipped || 0, unknown, endedAt: job.endedAt || null, sampleSize: job.sample ? job.sample.size : 0,
           ranges: buildRanges(job.segs),
           save: {
             enabled: !!settings.saveAudio, mode: settings.saveMode,
             saved, savable: restored, active: job.saving,
             bytes: job.savedBytes, savedAt: job.savedAt, paused: job.noSave,
-            quality: settings.saveQuality, limitReached: !!job.limitReached, maxMB: Number(settings.maxStorageMB) || 0,
+            quality: settings.saveQuality, aac: aacSupported, limitReached: !!job.limitReached, storageFull: !!job.storageFull, maxMB: Number(settings.maxStorageMB) || 0,
             compressing: job.compressing ? { done: job.compressDone, total: job.compressTotal } : null,
           },
         });
@@ -967,11 +1012,13 @@
     const SKIP_REST_AFTER_H = 36;
 
     // A small pool of workers, each finishing one segment before taking the next.
+    // A paused job (a quality the player isn't playing) stops taking segments
+    // and waits until it's played again.
     async function checkSegments(job, order, sample) {
       let next = 0;
       const worker = async () => {
         while (next < order.length) {
-          if (job.skipRest) break;
+          if ((sample && job.skipRest) || job.paused) break;
           const s = order[next++];
           try { await resolveSegment(s); } catch (e) { /* leave it muted */ }
           job.done++;
@@ -979,14 +1026,32 @@
           if (sample && sample.has(s)) {
             job.sample.done++;
             if (s.source) job.sample.found++;
-            if (job.sample.done === job.sample.size && !job.sample.found &&
+            if (!s.source && s.unknown) job.sample.unknown = (job.sample.unknown || 0) + 1;
+            if (job.sample.done === job.sample.size && !job.sample.found && !job.sample.unknown &&
                 job.endedAt && Date.now() - job.endedAt > SKIP_REST_AFTER_H * 36e5) job.skipRest = true;
           }
           throttledProgress(job);
         }
       };
-      await Promise.all(Array.from({ length: MAX_PARALLEL }, worker));
+      for (;;) {
+        await Promise.all(Array.from({ length: MAX_PARALLEL }, worker));
+        if (next >= order.length || (sample && job.skipRest) || !job.paused) break;
+        await new Promise((resolve) => { job.onResume = resolve; });
+      }
       flushGone();
+    }
+
+    // The player now plays `job`: pause the checks of this VOD's other
+    // qualities (each quality is a separate copy, so their checks are only
+    // useful when played) and resume this one.
+    function makeCurrent(job) {
+      currentJob = job;
+      noneCurrent = false;
+      for (const j of jobs) if (j !== job && !j.auto && j.vodBase === job.vodBase) j.paused = true;
+      if (job.paused) {
+        job.paused = false;
+        if (job.onResume) { const r = job.onResume; job.onResume = null; r(); }
+      }
     }
 
     // New muted segments in a VOD that is still recording.
@@ -1028,9 +1093,31 @@
       }
       job.finished = true;
       const restored = sendResult(job);
-      console.log(`${TAG} [${prettyQuality(job.dir)}] ${restored}/${job.segs.length} muted segments can be unmuted` +
-        (restored < job.segs.length ? ' (the rest is deleted in every quality)' : ''));
+      const unknown = job.segs.filter((x) => !x.source && x.unknown).length;
+      const gone = job.segs.length - restored - unknown;
+      log('info', `[${prettyQuality(job.dir)}] ${restored}/${job.segs.length} muted segments can be unmuted` +
+        (gone ? ` · ${gone} deleted in every quality` + (job.skipped ? ` (${job.skipped} not checked one by one: old VOD)` : '') : '') +
+        (unknown ? ` · ${unknown} not checked yet (network problem, will retry)` : ''));
       if (isCurrent(job)) { maybeSaveAll(job); scheduleCompress(job); }
+      retryUnknown(job, 1);
+    }
+
+    // Segments that couldn't be checked because of network problems are
+    // checked again later (30 s, 2 min, 5 min).
+    function retryUnknown(job, attempt) {
+      const todo = () => job.segs.filter((x) => !x.source && x.unknown && !x.confirmed);
+      if (!todo().length || attempt > 3 || job.retryTimer) return;
+      job.retryTimer = setTimeout(async () => {
+        job.retryTimer = null;
+        if (!jobs.includes(job)) return;
+        const segs = todo();
+        if (!segs.length) return;
+        log('info', `retrying ${segs.length} segment(s) that couldn't be checked (network problem)`);
+        await checkSegments(job, segs, null);
+        sendResult(job);
+        if (isCurrent(job)) maybeSaveAll(job);
+        retryUnknown(job, attempt + 1);
+      }, [0, 30e3, 120e3, 300e3][attempt]);
     }
 
     // ------------------------------------------------------------ saving
@@ -1385,8 +1472,15 @@
       // Another quality of this VOD may already know its saved size.
       const sibling = jobs.find((j) => j.vodKey === vodKey);
       if (sibling) Object.assign(job, { savedBytes: sibling.savedBytes, savedAt: sibling.savedAt, noSave: sibling.noSave });
-      jobs.push(job);
       job.auto = !!auto;
+      // Another quality of this VOD is already being played (the player loads
+      // several playlists when it adapts quality): wait until this one is.
+      if (!job.auto) {
+        const playing = currentJob && !currentJob.auto && currentJob.vodBase === vodBase ? currentJob
+          : jobs.filter((j) => !j.auto && j.vodBase === vodBase).pop();
+        if (playing) job.paused = true;
+      }
+      jobs.push(job);
       job.checked = checkAll(job);
       return out;
     }
@@ -1407,6 +1501,7 @@
     async function fetchSegment(seg, input, init) {
       const job = seg.job;
       const aborted = () => init && init.signal && init.signal.aborted;
+      let uncertain = false; // a file couldn't be checked (network problem)
 
       // a. Same quality: just serve the original file (and save its sound).
       const own = seg.source && !seg.source.includes('/') && seg.source !== 'saved'
@@ -1424,10 +1519,11 @@
             }
             return r;
           }
-          if (isMiss(r.status)) markMissing(url);
+          if (isMiss(r.status)) markMissing(url); else uncertain = true;
           try { r.body && r.body.cancel(); } catch (e) { /* ignore */ }
         } catch (e) {
           if (aborted()) throw e;
+          uncertain = true;
         }
       }
 
@@ -1450,6 +1546,7 @@
       if (seg.source && seg.source.includes('/')) donors.unshift(seg.source);
       const found = await Promise.all(donors.map((s) => probe(urlFor(seg, s), true)));
       const donor = donors[found.indexOf(true)];
+      if (found.includes(null)) uncertain = true;
       if (donor) {
         try {
           const other = await realFetch.call(scope, requestFor(urlFor(seg, donor), input), init);
@@ -1464,15 +1561,20 @@
             }
             if (res.ok) { confirm(seg, null); return res; }
           } else {
+            if (!isMiss(other.status)) uncertain = true;
             try { other.body && other.body.cancel(); } catch (e) { /* ignore */ }
           }
         } catch (e) {
           if (aborted()) throw e;
+          uncertain = true;
         }
       }
 
-      // d. Nothing left: play the muted file.
-      confirm(seg, null);
+      // d. Nothing found: play the muted file. If that may be only a network
+      //    problem, don't settle it: it's checked again later.
+      if (uncertain) {
+        if (!seg.source) { seg.unknown = true; if (job.finished) { scheduleResult(job); retryUnknown(job, 1); } }
+      } else confirm(seg, null);
       return realFetch.call(scope, requestFor(seg.urls.muted, input), init);
     }
 
@@ -1541,6 +1643,7 @@
     }
 
     // ------------------------------------------------------------ fetch hook
+    const restrictedNoted = new Set();
     async function handleOther(input, init, url) {
       const res = await realFetch.call(scope, input, init);
       if (!settings.enabled || !url || !res.ok || !/\.m3u8(\?|$)/.test(url)) return res;
@@ -1552,6 +1655,12 @@
         const clean = playlistUrl.split('?')[0];
         const vodBase = clean.slice(0, clean.lastIndexOf('/', clean.lastIndexOf('/') - 1) + 1);
         if (!text.includes('-muted.ts')) { switchVod(vodBase, null); return res; }
+        if (RESTRICTED) {
+          const muted = (text.match(/-muted\.ts/g) || []).length;
+          if (!restrictedNoted.has(vodBase)) { restrictedNoted.add(vodBase); log('info', `${muted} muted segments: Twitch only gives the original sound to www.twitch.tv, not to ${ORIGIN}`); }
+          post({ type: 'restricted', vod: vodBase, muted, origin: ORIGIN });
+          return res;
+        }
         if (!entry || entry.raw !== text) {
           // New, or Twitch's copy changed (a VOD still recording grows).
           entry = rewritePlaylist(text, playlistUrl, false, entry && entry.job);
@@ -1603,17 +1712,37 @@
   const MARK = '__vodUnmuterHooked';
   const isPlayerWorkerCode = (text) => /amazon-ivs-wasmworker|wasmworker\.min/.test(text);
 
+  // The text of Blobs made from strings, remembered so that (b) doesn't have
+  // to read a worker's code back with a synchronous request (slow, and a
+  // console warning in Firefox).
+  const blobText = new WeakMap(); // Blob -> its text
+  const urlText = new Map();      // blob: URL -> its text
+
   const OriginalBlob = window.Blob;
   window.Blob = class extends OriginalBlob {
     constructor(parts, options) {
+      let text = null;
       try {
         if (Array.isArray(parts) && parts.length && parts.every((p) => typeof p === 'string')) {
-          const text = parts.join('');
-          if (isPlayerWorkerCode(text) && !text.includes(MARK)) parts = [hookSource].concat(parts);
+          text = parts.join('');
+          if (isPlayerWorkerCode(text) && !text.includes(MARK)) { parts = [hookSource].concat(parts); text = hookSource + text; }
         }
-      } catch (e) { /* leave it as it was */ }
+      } catch (e) { text = null; /* leave it as it was */ }
       super(parts, options);
+      if (text !== null) blobText.set(this, text);
     }
+  };
+
+  const originalCreateURL = URL.createObjectURL;
+  const originalRevokeURL = URL.revokeObjectURL;
+  URL.createObjectURL = function (obj) {
+    const url = originalCreateURL.call(URL, obj);
+    try { if (obj && blobText.has(obj)) urlText.set(url, blobText.get(obj)); } catch (e) { /* ignore */ }
+    return url;
+  };
+  URL.revokeObjectURL = function (url) {
+    urlText.delete(url);
+    return originalRevokeURL.call(URL, url);
   };
 
   const OriginalWorker = window.Worker;
@@ -1626,12 +1755,17 @@
         if (!isModule) {
           let code;
           if (src.startsWith('blob:')) {
-            const xhr = new XMLHttpRequest();
-            xhr.open('GET', src, false); // read the original blob's code
-            xhr.overrideMimeType('text/javascript'); // (else Firefox tries to parse it as XML)
-            xhr.send();
+            let text = urlText.get(src);
+            if (text === undefined) {
+              // A Blob we didn't see being made: read its code back.
+              const xhr = new XMLHttpRequest();
+              xhr.open('GET', src, false);
+              xhr.overrideMimeType('text/javascript'); // (else Firefox tries to parse it as XML)
+              xhr.send();
+              text = xhr.responseText;
+            }
             // Already hooked by (a)? Then leave it alone.
-            code = xhr.responseText.includes(MARK) ? null : hookSource + xhr.responseText;
+            code = text.includes(MARK) ? null : hookSource + text;
           } else {
             code = hookSource + 'importScripts(' + JSON.stringify(new URL(src, location.href).href) + ');';
           }

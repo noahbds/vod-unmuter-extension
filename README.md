@@ -187,8 +187,9 @@ exactly at the segment's start. The encoder's delay is measured on your machine
 the first time. Tested result: the restored sound is in sync to the sample,
 with no dip at the joins.
 
-If your browser can't encode AAC (often Firefox), saved audio simply stays in
-lossless *Original* quality. Older uncompressed saves are compressed the next
+**Firefox can't encode AAC**, so there saved audio always stays in lossless
+*Original* quality (1.1–2.4 MB per muted minute, 2–3× more than *High*): plan
+a bigger storage limit. The popup and the counter's panel say so. Older uncompressed saves are compressed the next
 time you open that VOD.
 
 ### Storage limit
@@ -420,6 +421,13 @@ after* delay. Use **Back up…** in the popup to keep a copy in a file.
 The first visit checks every muted segment in every quality: about a minute
 for 1,000 muted segments. Hover the counter: after a few seconds it already
 gives an estimate. The next visit to the same VOD is nearly instant.
+
+**On an embedded player or m.twitch.tv the counter says "N muted"**
+Twitch's video servers only give the original sound of muted parts to
+www.twitch.tv: from `player.twitch.tv` (VODs embedded in other websites) and
+`m.twitch.tv` they refuse it. Click the counter, then **Open on twitch.tv**.
+On a phone, use "Request desktop site". Saved audio is also kept per site, so
+it's only available on www.twitch.tv.
 
 **Something looks broken after a Twitch update**
 Open the console (F12) and look for messages starting with `[VOD Unmuter]`. If

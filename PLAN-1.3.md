@@ -18,6 +18,22 @@ Effort: S = a day or less, M = a few days, L = a week or more.
 
 ## Phase 1: bug fixes
 
+**Status: done** (see CHANGELOG.md, 1.3.0). Results:
+- **B1, B2, B3, B7:** fixed and tested.
+- **B4:** not caused by this extension. Without TwitchNoSub, Twitch gives the
+  same error for a subscriber-only VOD with or without the extension
+  (`vod_manifest_restricted`). The 404 most likely comes from TwitchNoSub
+  replacing the master playlist.
+- **B5:** the extension now runs in a temporary Firefox profile (Selenium +
+  geckodriver), with console capture. Moving every test there is phase 4.
+- **B6:**
+  - two tabs on the same VOD: OK;
+  - storage full: fixed;
+  - embedded player and mobile site: Twitch refuses the originals there, so
+    the extension now says so instead of reporting everything deleted;
+  - very long VODs: OK (1,026 muted segments);
+  - not tested yet: private windows, extension update with Twitch tabs open.
+
 Found in a real Firefox console log (Squeezie VOD 2937494566, with TwitchNoSub
 installed) and in parts of the code that were never tested outside Chromium.
 

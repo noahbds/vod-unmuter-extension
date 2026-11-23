@@ -367,6 +367,27 @@
       badge.classList.toggle('vu-open', pinned);
     };
 
+    if (state.type === 'restricted') {
+      const open = () => {
+        const v = document.querySelector('video');
+        const t = v && v.currentTime > 1 ? Math.floor(v.currentTime) : 0;
+        const at = t ? `?t=${Math.floor(t / 3600)}h${Math.floor((t % 3600) / 60)}m${t % 60}s` : '';
+        window.open(`https://www.twitch.tv/videos/${vodId}${at}`, '_blank', 'noopener');
+      };
+      const where = /\/\/m\./.test(state.origin || '') ? 'the mobile site' : 'embedded players';
+      badge.append(h('button', { class: 'vu-btn', 'aria-haspopup': 'true', onclick: toggle,
+        'aria-label': `${state.muted} muted segments: open on twitch.tv to unmute them` },
+        h('span', { class: 'vu-part-c' }, speakerIcon(false)), h('span', null, `${state.muted} muted`)),
+      h('div', { class: 'vu-panel', onclick: (e) => e.stopPropagation() },
+        h('div', { class: 'vu-panel-inner' },
+          h('div', { class: 'vu-note', style: 'margin-top:0' },
+            `Twitch only gives the original sound of muted parts to www.twitch.tv, not to ${where}. ` +
+            'Open this VOD on twitch.tv (same moment) to hear them.' +
+            (where === 'the mobile site' ? ' On a phone, use "Request desktop site".' : '')),
+          h('button', { class: 'vu-link', onclick: open }, 'Open on twitch.tv ↗'))));
+      return;
+    }
+
     if (state.type === 'checking') {
       const pct = Math.round(((state.done || 0) / state.muted) * 100);
       const sample = state.sample && state.sample.size && state.sample.done >= state.sample.size ? state.sample : null;
@@ -396,6 +417,7 @@
           state.fromOther ? [h('span', null, '…using other qualities'), h('span', null, state.fromOther)] : null,
           state.fromSaved ? [h('span', null, '…using your saved copy'), h('span', null, state.fromSaved)] : null,
           h('span', null, 'Still muted'), h('span', { class: muted - restored ? 'vu-no-c' : '' }, muted - restored),
+          state.unknown ? [h('span', null, '…not checked yet (network problem, retrying)'), h('span', null, state.unknown)] : null,
           h('span', null, 'Audio restored'), h('span', null, `${span(state.restoredSeconds)} / ${span(state.mutedSeconds)}`)),
         h('div', { class: 'vu-meter', title: `${pct}% of the muted time restored` },
           h('div', { style: `width:${pct}%` })),
@@ -441,8 +463,9 @@
         h('div', { class: 'vu-meter vu-meter-save' }, h('div', { style: `width:${p}%` }))];
     } else if (sv.limitReached && sv.saved < sv.savable) {
       body = [h('div', null, `${sv.saved} / ${sv.savable} segments saved`, sv.bytes ? h('span', { class: 'vu-sub' }, ` · ${mb(sv.bytes)}`) : null),
-        h('div', { class: 'vu-no-c', style: 'font-size:12px' },
-          `Storage limit reached (${sv.maxMB >= 1000 ? sv.maxMB / 1000 + ' GB' : sv.maxMB + ' MB'}). Raise it or pick a smaller saved quality in the extension menu.`),
+        h('div', { class: 'vu-no-c', style: 'font-size:12px' }, sv.storageFull
+          ? 'Your browser\'s storage for twitch.tv is full (the disk is nearly full, or the browser\'s own limit). Free some disk space or delete saved VODs in the extension menu.'
+          : `Storage limit reached (${sv.maxMB >= 1000 ? sv.maxMB / 1000 + ' GB' : sv.maxMB + ' MB'}). Raise it or pick a smaller saved quality in the extension menu.`),
         sv.saved ? link('Delete saved audio for this VOD', 'deleteSaved') : null];
     } else if (!sv.saved && !sv.savable) {
       body = [h('div', { class: 'vu-sub' }, 'Nothing to save: Twitch already deleted the originals.')];
@@ -453,7 +476,9 @@
           ' segments saved', sv.bytes ? h('span', { class: 'vu-sub' }, ` · ${mb(sv.bytes)}`) : null),
         sv.compressing
           ? h('div', { class: 'vu-sub' }, `Compressing… ${sv.compressing.done} / ${sv.compressing.total}`)
-          : h('div', { class: 'vu-sub' }, QUALITY_LABEL[sv.quality] || ''),
+          : h('div', { class: 'vu-sub' }, sv.aac === false && sv.quality !== 'original'
+            ? 'Saved in original quality (lossless): this browser can\'t compress audio'
+            : QUALITY_LABEL[sv.quality] || ''),
         h('div', { class: 'vu-sub' }, all
           ? 'This VOD stays unmuted after Twitch deletes the originals.'
           : sv.mode === 'watched'
@@ -605,6 +630,9 @@
       if (state && state.type === 'result' && state.key === m.key) return;
       state = m; version++;
     } else if (m.type === 'result') {
+      state = m; version++;
+    } else if (m.type === 'restricted') {
+      if (state && state.type === 'restricted' && state.vod === m.vod) return;
       state = m; version++;
     } else if (m.type === 'none') {
       // The player moved on from that VOD.

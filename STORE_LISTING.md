@@ -23,7 +23,7 @@ FEATURES
 • Counter in the player, next to the settings button: how many muted parts were unmuted. Hover it for details and the list of every muted part.
 • Green seek bar: unmuted parts in green, still-muted parts in red. Hover one to see its time and where its sound comes from.
 • Fast: an estimate within seconds, then every muted part is checked. VODs whose sound Twitch deleted long ago are recognized in seconds, and opening a VOD again is almost instant.
-• Save audio for later: keeps the sound of muted parts on your computer, compressed (about 0.75 MB per muted minute), with a storage limit and automatic deletion after the delay you choose.
+• Save audio for later: keeps the sound of muted parts on your computer, compressed in Chrome, Edge and Brave (about 0.75 MB per muted minute; Firefox keeps it lossless, 1.1 to 2.4 MB), with a storage limit and automatic deletion after the delay you choose.
 • Auto-save channels: add your favorite channels, and their new VODs (and live streams) are saved without you opening them.
 • Backups: export your saved audio to a file and import it again, in the same browser or another one.
 

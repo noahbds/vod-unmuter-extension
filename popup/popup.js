@@ -33,6 +33,19 @@ async function loadSettings() {
   refreshDependents();
 }
 
+// Firefox has no AAC encoder: High and Small can't be made there.
+let aac = true;
+(async () => {
+  try {
+    aac = typeof AudioEncoder === 'function' && !!(await AudioEncoder.isConfigSupported({
+      codec: 'mp4a.40.2', sampleRate: 48000, numberOfChannels: 2, bitrate: 96000, aac: { format: 'adts' } })).supported;
+  } catch (e) { aac = false; }
+  if (!aac) {
+    for (const o of $('saveQuality').options) if (o.value !== 'original') o.textContent += ' (not in this browser)';
+  }
+  refreshDependents();
+})();
+
 function refreshDependents() {
   const on = $('saveAudio').checked;
   document.querySelectorAll('[data-needs="saveAudio"]').forEach((row) => {
@@ -40,7 +53,9 @@ function refreshDependents() {
     row.querySelectorAll('select, input, button').forEach((s) => { s.disabled = !on; });
   });
   $('saveModeHelp').textContent = MODE_HELP[$('saveMode').value];
-  $('saveQualityHelp').textContent = QUALITY_HELP[$('saveQuality').value];
+  $('saveQualityHelp').textContent = !aac && $('saveQuality').value !== 'original'
+    ? 'This browser can\'t compress audio, so saves stay lossless: 1.1 to 2.4 MB per muted minute'
+    : QUALITY_HELP[$('saveQuality').value];
 }
 
 // ---------------------------------------------------------------- saved audio

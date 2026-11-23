@@ -1,5 +1,36 @@
 # Changelog
 
+## 1.3.0 (in progress)
+
+Phase 1, bug fixes:
+
+- **Network errors no longer count as "deleted".** A timeout or server error
+  used to make a part look deleted for good, and a part *played* during an
+  outage stayed muted for the whole session. Now only "not found" answers
+  mean deleted. Others are shown as "not checked yet (network problem,
+  retrying)" and checked again after 30 s, 2 min and 5 min. Tested with
+  Twitch's servers failing for 15 s: back to 94 / 108, the same as without
+  errors.
+- **Only the quality being played is checked.** The player loads several
+  qualities when it adapts, and each one used to get its own full check (up
+  to 5× the requests, and the counter jumped back when the quality changed).
+  Other qualities now wait, and resume if the player switches to them.
+- **Embedded player and mobile site.** Twitch's video servers refuse the
+  original files of muted parts to `player.twitch.tv` and `m.twitch.tv`
+  (same file: 200 from www.twitch.tv, 403 from those). The extension used to
+  report every part as deleted there, and remember it. Now it shows "N muted"
+  with an explanation and an **Open on twitch.tv** button (same moment).
+- **Firefox can't compress saved audio.** It has no AAC encoder, so *High*
+  and *Small* silently stayed lossless (2–3× bigger). The popup and the
+  counter's panel now say so.
+- **Browser storage full.** Saving now stops once with a clear message in the
+  panel, instead of failing on every segment.
+- **No more synchronous request when the player starts** (Firefox showed a
+  warning for it). It's still used as a fallback when another extension
+  creates the player.
+- Console: one summary per VOD, with how many parts are deleted, not checked
+  (old VOD) or not checked yet (network problem).
+
 ## 1.2.0
 
 Faster:
