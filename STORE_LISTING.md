@@ -142,13 +142,64 @@ This only works once `PRIVACY.md` is pushed to GitHub and the repository is publ
 Restores the sound in muted parts of Twitch VODs, using Twitch's original audio while it still exists. Saves it on your computer so VODs stay unmuted after Twitch deletes the originals, and can auto-save your favorite channels.
 ```
 
-### Description
+### Description (Markdown, 250 first characters matter most)
 
-Same text as the Chrome Web Store description above.
+```
+**Brings back the sound in the muted parts of Twitch VODs.** Twitch keeps the original audio for about a day after a stream: VOD Unmuter plays it right in the normal Twitch player, and can save it so the VOD stays unmuted after Twitch deletes it.
 
-### Categories
+**How it works**
 
-Photos, Music & Videos (or Social & Communication)
+* **Automatic:** open a VOD and the muted parts play with sound. Nothing to click.
+* **Every quality as a backup:** Twitch keeps a separate copy per quality and deletes them separately. If yours lost a part, the sound comes from another quality; the picture stays in yours.
+* **Counter in the player**, next to the settings button: how many muted parts were unmuted, with details and the list of every muted part.
+* **Green seek bar:** unmuted parts in green, still-muted ones in red. Hover a part to see where its sound comes from, whether it's saved, and why it's still muted if it is.
+* **Clear explanations:** the panel says why a VOD isn't fully unmuted (e.g. "the stream ended 3 days ago, Twitch deletes the sound 13 to 32 hours after a stream").
+
+**Keep the sound for later**
+
+* **Save audio:** the whole VOD, or only the parts ahead of where you are (handy to resume a stream you watched live). Storage limit and automatic cleanup. In Firefox, saved audio stays lossless (1.1 to 2.4 MB per muted minute).
+* **Auto-save channels:** new VODs of the channels you choose are saved in the background, even if you don't open them. Optional notifications.
+* **Saved audio list:** grouped by channel, pin the VODs to keep, export to a file and import it in another browser.
+
+**Good to know**
+
+* Restoring only works while Twitch still has the original audio (13 to 32 hours after a stream), or if it was saved before. That's what auto-save is for.
+* Subscriber-only VODs work when you're logged in with a subscribed account.
+* Embedded players and the mobile site can't be unmuted: Twitch only gives the original sound to www.twitch.tv.
+* Not affiliated with or endorsed by Twitch.
+
+**Privacy:** everything stays in your browser. No account, no server, no analytics, no tracking. The extension only talks to Twitch.
+```
+
+### Other fields
+
+| Field | Answer |
+|---|---|
+| Ce module est expérimental ? | No |
+| Nécessite un paiement… ? | No |
+| Catégories (up to 3) | **Photos, musique et vidéos** · **Jeux et divertissements** |
+| E-mail d'assistance | Optional: leave empty, or an address you want to make public |
+| Site d'assistance | `https://github.com/noahbds/vod-unmuter-extension/issues` |
+| Licence | **Licence MIT** (same as the `LICENSE` file) |
+| Ce module a une politique de confidentialité ? | Yes: paste the content of `PRIVACY.md` |
+
+### Notes aux testeurs (reviewer notes)
+
+```
+No build step changes the code: build.mjs only copies src/, popup/, icons/ and LICENSE into dist/firefox and writes the Firefox manifest (background "scripts" instead of a service worker, plus browser_specific_settings). Nothing is minified, bundled or generated, so the uploaded files are the source. Source repository: https://github.com/noahbds/vod-unmuter-extension
+
+How to test (no Twitch account needed):
+1. Open a Twitch VOD that ended less than ~10 hours ago and has muted parts (red marks on the seek bar). Muted parts play with sound; a counter "restored / muted" appears next to the player's settings button.
+2. Open an older VOD (several days): the counter shows 0 / N and its panel explains that Twitch already deleted the original audio.
+3. Extension menu: settings, auto-save channels, saved audio, Help (status, diagnostic report).
+
+Why some code looks unusual:
+- src/hook.js runs in the page (content script, world MAIN) and must also run inside Twitch's video player, which is a Web Worker created from a Blob. It wraps window.Worker and window.Blob to prepend its own code (the same file) to the player worker. Nothing else is changed in Twitch's code.
+- It fetches Twitch's own files (playlists and 10-second video segments from Twitch's CDN) to find the original, unmuted audio, and splices that audio into the muted segments (MPEG-TS packets, in JavaScript).
+- gql.twitch.tv is called with Twitch's public web client id (the one twitch.tv itself uses) to list recent VODs of the channels the user adds to auto-save. For subscriber-only VODs, the user's Twitch "auth-token" cookie is read in the twitch.tv page and sent only to gql.twitch.tv to get a playback token, exactly like Twitch's player.
+- Auto-save may open https://www.twitch.tv/robots.txt in a background tab (and close it) when no Twitch tab is open, because saved audio lives in twitch.tv's IndexedDB.
+- No remote code, no eval, no analytics. Data stays in the browser (see the privacy policy).
+```
 
 ### Release notes for version 1.3.0
 
