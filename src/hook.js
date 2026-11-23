@@ -88,10 +88,41 @@
 
     const realFetch = scope.fetch;
     let settings = { enabled: true, saveAudio: true, saveMode: 'whole', keepDays: 60, saveQuality: 'high', maxStorageMB: 1000, debug: false };
+    // "whole": save every muted part. "unplayed": save the parts not watched
+    // yet, and drop a part's saved copy once it has been watched through.
+    // (Older versions had "watched"; it now means "unplayed".)
+    const saveMode = () => (settings.saveMode === 'whole' ? 'whole' : 'unplayed');
+    const AHEAD_MIN_PLAY = 20; // seconds of playback before a new position counts
+    const isBehind = (job, s) => !!job.behind && s.start + s.duration <= job.behind;
+    // Not worth saving now: behind the confirmed position, or behind where the
+    // player is right now (if you rewind, those parts are saved then).
+    const notAhead = (job, s) => isBehind(job, s) || (job.position !== undefined && s.start + s.duration <= job.position);
+    const POSITION_WAIT_MS = 15000; // "ahead of me" waits this long for the player's position
+
+    // "Parts ahead of me" mode: removes the saved copies of the parts behind
+    // the furthest position reached in this VOD, and of `watched` parts.
+    async function dropBehind(job, watched) {
+      const drop = job.segs.filter((s) => job.saved.has(s.num) && (isBehind(job, s) || (watched || []).includes(s)));
+      for (const s of drop) {
+        await deleteSavedSegment(job.vodKey, s.num);
+        for (const j of jobs) {
+          if (j.vodKey !== job.vodKey) continue;
+          j.saved.delete(s.num);
+          for (const x of j.segs) if (x.num === s.num) x.removedAfterWatch = isBehind(job, s) && !s.played ? 'behind' : 'watched';
+        }
+      }
+      if (drop.length) {
+        log('info', `${jobName(job)}: removed ${drop.length} saved part(s) behind where you are`);
+        scheduleResult(job);
+      }
+    }
 
     let channel = null;
     try { channel = new BroadcastChannel(CHANNEL); } catch (e) { /* unsupported */ }
-    const post = (msg) => { try { channel && channel.postMessage(msg); } catch (e) { /* ignore */ } };
+    // The channel is shared by every twitch.tv tab: each message says which
+    // tab it comes from, so a tab's counter only shows its own VOD.
+    const TAB = scope.__vodUnmuterTab || '';
+    const post = (msg) => { try { channel && channel.postMessage(Object.assign({ tab: TAB }, msg)); } catch (e) { /* ignore */ } };
 
     const known = new Map();       // file URL -> true (exists) / false (gone)
     const pending = new Map();     // file URL -> Promise<boolean>
@@ -646,6 +677,27 @@
       return keep.length >= frameCount - 2 ? concat(keep) : null;
     }
 
+    // Removes one part's saved copy and keeps the VOD's totals right.
+    async function deleteSavedSegment(vod, num) {
+      try {
+        await idb(['audio', 'vods'], 'readwrite', (audio, vods) => {
+          const key = vod + '|' + num;
+          const old = audio.get(key);
+          old.onsuccess = () => {
+            if (!old.result) return;
+            audio.delete(key);
+            const v = vods.get(vod);
+            v.onsuccess = () => {
+              if (!v.result) return;
+              v.result.segments = Math.max(0, v.result.segments - 1);
+              v.result.bytes = Math.max(0, v.result.bytes - recBytes(old.result));
+              vods.put(v.result); // kept even when empty: it remembers the position ("Parts ahead of me")
+            };
+          };
+        });
+      } catch (e) { log('warn', 'could not remove a watched part\'s saved copy', e); }
+    }
+
     async function deleteSavedVod(vod) {
       await idb(['audio', 'vods'], 'readwrite', (audio, vods) => {
         audio.delete(audioRange(vod));
@@ -679,18 +731,21 @@
       });
     }
 
-    async function listSaved() {
-      return (await idb('vods', 'readonly', (vods, out) => {
+    // Saved VODs (records left with no part, which only remember a position,
+    // are left out unless `all`).
+    async function listSaved(all) {
+      const list = (await idb('vods', 'readonly', (vods, out) => {
         const r = vods.getAll();
         r.onsuccess = () => { out.value = r.result; };
       })) || [];
+      return all ? list : list.filter((v) => v.segments > 0);
     }
 
     async function expireSaved(keepDays) {
       expireGone();
       if (!keepDays) return; // 0 = keep forever
       const limit = Date.now() - keepDays * 864e5;
-      for (const v of await listSaved()) if (v.savedAt < limit && !v.pinned) await deleteSavedVod(v.vod);
+      for (const v of await listSaved(true)) if (v.savedAt < limit && !v.pinned) await deleteSavedVod(v.vod);
     }
 
     // ---- backup files ------------------------------------------------------
@@ -974,12 +1029,15 @@
         const kind = restored ? 'ok' : reason === 'checking' ? 'pending' : reason === 'network' ? 'wait' : 'no';
         const contiguous = cur && Math.abs(cur.end - s.start) < 0.5 && cur.kind === kind;
         if (!contiguous) {
-          cur = { start: s.start, end: s.start, segments: 0, restored, kind, sources: new Map(), reasons: {} };
+          cur = { start: s.start, end: s.start, segments: 0, restored, kind, sources: new Map(), reasons: {}, saved: 0, removedWatched: 0 };
           ranges.push(cur);
         }
         cur.end = s.start + s.duration;
         cur.segments++;
         if (!restored) cur.reasons[reason] = (cur.reasons[reason] || 0) + 1;
+        if (s.job.saved.has(s.num)) cur.saved++;
+        if (s.removedAfterWatch === 'behind') cur.removedBehind = (cur.removedBehind || 0) + 1;
+        else if (s.removedAfterWatch) cur.removedWatched++;
         if (s.source) {
           const d = describe(s);
           const k = d.kind + '|' + d.quality;
@@ -990,7 +1048,7 @@
       return ranges.map((r) => ({
         start: r.start, end: r.end, segments: r.segments, restored: r.restored, kind: r.kind,
         sources: [...r.sources.values()].sort((a, b) => b.segments - a.segments),
-        reasons: r.reasons,
+        reasons: r.reasons, saved: r.saved, removedWatched: r.removedWatched, removedBehind: r.removedBehind || 0,
       }));
     }
 
@@ -1155,6 +1213,12 @@
     async function checkAll(job) {
       job.saved = await loadSavedNums(job.vodKey);
       job.cachedGone = await loadGone(job);
+      // Furthest position reached in this VOD before ("Parts ahead of me").
+      try {
+        const info = (await listSaved(true)).find((v) => v.vod === job.vodKey);
+        if (info && info.behind) job.behind = info.behind;
+      } catch (e) { /* none */ }
+      if (job.behind && saveMode() === 'unplayed' && !job.auto) dropBehind(job, []);
       const info = vodInfo(job.vodKey);
       if (info.streamedAt) job.endedAt = info.streamedAt + job.total * 1000;
       sendState(job);
@@ -1266,7 +1330,6 @@
       if (!info) return;
       for (const j of jobs) if (j.vodKey === job.vodKey) j.saved.add(seg.num);
       noteSaved(job, info);
-      if (settings.saveMode !== 'whole') scheduleCompress(job);
     }
 
     // Which quality to download for saving: the smallest file that still has
@@ -1279,18 +1342,31 @@
       return ['audio_only', ...good, ...low];
     }
 
-    // "Whole VOD" mode: save every muted part that can still be unmuted, not
-    // just the ones played.
+    // Save every muted part that can still be unmuted, in the background
+    // ("unplayed" mode: except the parts already watched).
     async function maybeSaveAll(job, force) {
-      if (!settings.saveAudio || (!force && settings.saveMode !== 'whole') || job.noSave) return;
+      if (!settings.saveAudio || job.noSave) return;
       if (!job.finished || job.saving || job.savedAll) return;
-      const todo = job.segs.filter((s) => s.source && s.source !== 'saved' && !job.saved.has(s.num));
+      const ahead = saveMode() === 'unplayed';
+      // "Ahead of me" in the player: wait for its position first, so nothing
+      // behind it is ever downloaded (auto-save has no player: no wait).
+      if (ahead && !job.auto && job.position === undefined && !job.positionTimedOut) {
+        if (!job.positionTimer) {
+          job.positionTimer = setTimeout(() => { job.positionTimedOut = true; maybeSaveAll(job); }, POSITION_WAIT_MS);
+        }
+        return;
+      }
+      const skip = (s) => ahead && (s.played || notAhead(job, s));
+      const todo = job.segs.filter((s) => s.source && s.source !== 'saved' && !job.saved.has(s.num) && !skip(s));
+      // Nearest first, from where the player is.
+      if (ahead && job.position !== undefined) todo.sort((a, b) => a.start - b.start);
       if (!todo.length) { job.savedAll = true; compressJob(job); return; }
       job.saving = true;
       sendResult(job);
       const dirs = saveDirs(job);
       await Promise.all(todo.map((seg) => saveLimited(async () => {
         if (!settings.saveAudio || job.noSave || job.limitReached || job.saved.has(seg.num)) return;
+        if (skip(seg)) return; // the player moved past it meanwhile
         for (const dir of dirs) {
           for (const sfx of SUFFIXES) {
             const url = urlFor(seg, dir + '/' + sfx);
@@ -1623,7 +1699,7 @@
           if (r.ok) {
             known.set(url, true);
             confirm(seg, sfx);
-            if (settings.saveAudio && !job.noSave && !job.saved.has(seg.num)) {
+            if (settings.saveAudio && !job.noSave && !job.saved.has(seg.num) && saveMode() === 'whole') {
               r.clone().arrayBuffer().then((b) => saveFromBytes(seg, new Uint8Array(b))).catch(() => {});
             }
             return r;
@@ -1670,7 +1746,7 @@
             const { res, ok } = await spliced(seg, input, init, audio);
             if (ok) {
               confirm(seg, donor);
-              if (settings.saveAudio && !job.noSave && !job.saved.has(seg.num)) saveFromBytes(seg, ob);
+              if (settings.saveAudio && !job.noSave && !job.saved.has(seg.num) && saveMode() === 'whole') saveFromBytes(seg, ob);
               return res;
             }
             if (res.ok) {
@@ -1736,6 +1812,44 @@
             try { await deleteSavedVod(m.vodKey); } catch (e) { log('warn', 'could not delete saved audio', e); }
           }
           for (const job of jobs) if (job.vodKey === m.vodKey && job.finished) sendResult(job);
+        } else if (m.type === 'position' && m.tab === TAB && typeof m.t === 'number') {
+          // Where the player is (sent every second, even paused).
+          const job = currentJob;
+          if (!job || job.auto) return;
+          const prev = job.position;
+          job.position = m.t;
+          clearTimeout(job.positionTimer);
+          // First position known, or rewound: parts ahead may need saving.
+          if (saveMode() === 'unplayed' && (prev === undefined || m.t < prev - 15)) {
+            job.savedAll = false;
+            maybeSaveAll(job);
+          }
+        } else if (m.type === 'played' && m.tab === TAB && typeof m.from === 'number' && typeof m.to === 'number') {
+          // The player went from m.from to m.to (seconds of the VOD).
+          const job = currentJob;
+          if (!job || job.auto) return;
+          // A part watched (almost) entirely counts as played.
+          const done = [];
+          for (const s of job.segs) {
+            const overlap = Math.min(m.to, s.start + s.duration) - Math.max(m.from, s.start);
+            if (overlap <= 0 || s.played) continue;
+            s.playedSeconds = (s.playedSeconds || 0) + overlap;
+            if (s.playedSeconds < s.duration - 1) continue;
+            s.played = true;
+            done.push(s);
+          }
+          // "Ahead of me": after 20 s of continuous playback, everything before
+          // the position (minus those 20 s) is behind you, watched or skipped.
+          const run = job.run && Math.abs(m.from - job.run.end) <= 1.5 ? job.run : (job.run = { start: m.from, end: m.from });
+          run.end = m.to;
+          if (run.end - run.start >= AHEAD_MIN_PLAY) {
+            const pos = run.end - AHEAD_MIN_PLAY;
+            if (pos > (job.behind || 0)) {
+              job.behind = pos;
+              updateVodInfo(job.vodKey, { behind: pos });
+            }
+          }
+          if (saveMode() === 'unplayed') await dropBehind(job, done);
         } else if (m.type === 'diag-request' && m.id) {
           // Diagnostic report (ui.js): this instance's log and self-check.
           let idb = null;
@@ -1768,8 +1882,7 @@
           }
           for (const job of jobs) {
             if (job.vodKey !== m.vodKey || !isCurrent(job)) continue;
-            if (settings.saveMode === 'whole') maybeSaveAll(job);
-            else sendResult(job);
+            maybeSaveAll(job);
           }
         }
       });
@@ -1843,6 +1956,9 @@
   }
 
   // 1) Hook the page itself (in case the player ever runs without a worker).
+  // Id of this tab, shared with the copies of the hook in its player workers
+  // (prepended to their code below) and with ui.js.
+  window.__vodUnmuterTab = window.__vodUnmuterTab || Math.random().toString(36).slice(2, 10);
   installUnmuteHook(window);
 
   // 2) Get the same hook to run first inside Twitch's player worker. (The
@@ -1855,7 +1971,8 @@
   //       extensions, create the worker from a Blob): works whatever the
   //       order of the extensions;
   //    b. when a Worker is created from anything else.
-  const hookSource = '(' + installUnmuteHook.toString() + ')(self);\n';
+  const hookSource = 'self.__vodUnmuterTab = ' + JSON.stringify(window.__vodUnmuterTab) + ';\n' +
+    '(' + installUnmuteHook.toString() + ')(self);\n';
   const MARK = '__vodUnmuterHooked';
   const isPlayerWorkerCode = (text) => /amazon-ivs-wasmworker|wasmworker\.min/.test(text);
 

@@ -191,7 +191,10 @@
     return new Promise((resolve) => {
       const id = Math.random().toString(36).slice(2);
       const replies = [];
-      const listen = (ev) => { if (ev.data && ev.data.type === 'diag-reply' && ev.data.id === id) replies.push(ev.data); };
+      const listen = (ev) => {
+        const d = ev.data;
+        if (d && d.type === 'diag-reply' && d.id === id && (!d.tab || d.tab === window.__vodUnmuterTab)) replies.push(d);
+      };
       const ch = new BroadcastChannel('vod-unmuter');
       ch.addEventListener('message', listen);
       ch.postMessage({ type: 'diag-request', id });
@@ -485,6 +488,7 @@
     }
     .vu-tip-head { font-weight: 700; margin-bottom: 2px; }
     .vu-tip-line { color: #adadb8; font-variant-numeric: tabular-nums; }
+    .vu-saved-line { margin-top: 8px; padding-top: 6px; border-top: 1px solid rgba(255, 255, 255, 0.12); }
     .vu-tip-title { color: #adadb8; font-size: 10.5px; text-transform: uppercase; letter-spacing: .06em; margin: 7px 0 3px; }
     .vu-src { display: grid; grid-template-columns: auto 1fr; gap: 0 7px; margin-top: 4px; }
     .vu-src .vu-dot { margin-top: 5px; }
@@ -687,8 +691,8 @@
             : QUALITY_LABEL[sv.quality] || ''),
         h('div', { class: 'vu-sub' }, all
           ? 'This VOD stays unmuted after Twitch deletes the originals.'
-          : sv.mode === 'watched'
-            ? 'Only the parts you play are saved (change this in the extension menu).'
+          : sv.mode !== 'whole'
+            ? 'Only parts ahead of where you are are kept (after 20 s of playback there). Rewinding to an earlier part plays muted once Twitch deletes the original.'
             : 'The rest will be saved while you watch.'),
         sv.saved ? h('div', { style: 'display:flex;gap:14px' },
           link('Delete saved audio for this VOD', 'deleteSaved'),
@@ -739,6 +743,24 @@
       const f = Math.max(0, Math.min(1, (p - el.vuFrom) / ((el.vuTo - el.vuFrom) || 1))) * 100;
       el.style.setProperty('--vu-played', f.toFixed(2) + '%');
     }
+  }
+
+  // "Saved copy: …" line of the seek bar tooltip: is this part kept on this
+  // computer, for when Twitch deletes the original?
+  function savedCopyLine(r) {
+    if (typeof r.saved !== 'number') return null;
+    const sv = state.save || {};
+    const n = r.segments;
+    let text;
+    if (r.saved >= n) text = 'yes';
+    else if (r.saved > 0) text = `${r.saved} of ${n} segments`;
+    else if ((r.removedWatched || 0) + (r.removedBehind || 0) >= n) text = r.removedBehind ? 'removed (you\'re past this part)' : 'removed after you watched it';
+    else if (!sv.enabled) text = 'none (saving is off)';
+    else if (!r.restored) text = 'none';
+    else text = sv.mode === 'whole' ? 'not yet' : 'none';
+    const removed = (r.removedWatched || 0) + (r.removedBehind || 0);
+    if (r.saved > 0 && r.saved < n && removed) text += `, ${removed} removed (behind where you are)`;
+    return h('div', { class: 'vu-src-why vu-saved-line' }, h('b', null, 'Saved copy: '), text);
   }
 
   // "· via 720p60" when part of a range's sound comes from another quality.
@@ -852,6 +874,7 @@
         : Object.entries(hit.reasons || { gone: hit.segments }).sort((a, b) => b[1] - a[1]).map(([reason, n], i, all) =>
             h('div', { class: 'vu-src-why', style: 'margin-top:4px' },
               all.length > 1 ? h('b', null, `${plural(n, 'segment')}: `) : null, reasonText(reason, state))),
+      savedCopyLine(hit),
     ].flat(Infinity));
 
     if (tip.parentNode !== player) player.append(tip);
@@ -881,6 +904,8 @@
   channel.addEventListener('message', (ev) => {
     const m = ev.data;
     if (!m) return;
+    // Messages from the extension in other twitch.tv tabs (each has its own VOD).
+    if (m.tab && window.__vodUnmuterTab && m.tab !== window.__vodUnmuterTab) return;
     if (m.type === 'hello' && m.where === 'player') { playerHellos++; return; }
     if (m.instance && ['checking', 'result', 'none'].includes(m.type)) {
       if (m.playing) owner = m.instance;
@@ -907,6 +932,24 @@
   channel.postMessage({ type: 'hello' });
 
   setInterval(update, 700);
+
+  // Tells the extension which part of the VOD was really watched (for "Parts
+  // I haven't played"): the video's clock is the VOD's own timeline (checked:
+  // 3601.0 s shows as 01:00:00). Only while it plays, in small steps (a jump
+  // is a seek), and only for a video as long as the VOD (not an ad).
+  let lastWatched = null;
+  setInterval(() => {
+    const v = document.querySelector('video');
+    const isVod = v && state && state.total && Number.isFinite(v.duration) && Math.abs(v.duration - state.total) < 120;
+    // Where the player is, even paused: "Parts ahead of me" saves only from here.
+    if (v && vodId && isVod) channel.postMessage({ type: 'position', tab: window.__vodUnmuterTab, t: v.currentTime });
+    if (!v || v.paused || !vodId || !isVod) { lastWatched = null; return; }
+    const t = v.currentTime;
+    if (lastWatched !== null && t > lastWatched && t - lastWatched <= 5) {
+      channel.postMessage({ type: 'played', tab: window.__vodUnmuterTab, from: lastWatched, to: t });
+    }
+    lastWatched = t;
+  }, 1000);
   // Keep the watched part in step with playback (media events don't bubble,
   // but they do pass through the document in the capture phase).
   for (const type of ['timeupdate', 'seeked']) {

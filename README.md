@@ -28,6 +28,7 @@ after Twitch deletes it.
 - [Other ways to get the audio back](#other-ways-to-get-the-audio-back)
 - [Privacy](#privacy)
 - [Troubleshooting](#troubleshooting)
+- [Testing](#testing)
 - [Project files](#project-files)
 
 ---
@@ -138,7 +139,7 @@ Click the extension's icon in the toolbar.
 | **Counter in the player** | On | The counter next to ⚙️ |
 | **Green seek bar** | On | Recolors muted parts and shows details on hover |
 | **Save audio for later** | On | Keeps the sound of muted parts on this computer (see below) |
-| **What to save** | Whole VOD | *Whole VOD*: every part that can still be unmuted, in the background. *Parts I play*: only what you watch (less download, but unwatched parts are lost when Twitch deletes them) |
+| **What to save** | Whole VOD | *Whole VOD*: every part that can still be unmuted, in the background. *Parts ahead of me*: only parts ahead of where you are. Nothing behind the player's position is downloaded (saving starts from it, nearest first). Once you've played 20 s at a position, saved copies of every part before it (watched or skipped) are removed; your furthest position is remembered per VOD |
 | **Saved quality** | High | *Original*: lossless. *High*: 96 kbps. *Small*: 64 kbps. See [compression](#compression) |
 | **Storage limit** | 1 GB | 250 MB to 5 GB, or no limit. When full, the oldest saved VODs are deleted first |
 | **Delete saved audio after** | 60 days | 7 days, 30 days, 60 days, 6 months or never. Twitch keeps VODs at most 60 days |
@@ -220,7 +221,7 @@ on this computer only.
 **Managing it:**
 - In the **player**: hover the counter → *Saved on this computer* → *Delete
   saved audio for this VOD*. *Save it again* undoes that during the session.
-- In the **popup**: saved VODs grouped by channel (with a total and **Delete
+- In the **popup**, *Saved* tab: saved VODs grouped by channel (with a total and **Delete
   channel**). Each one says how much is saved and why the rest isn't (e.g.
   "94 / 108 parts saved · 14 deleted by Twitch before saving"), with buttons
   to **📌 pin** it (never deleted automatically), **⤓ export** it, or **✕**
@@ -463,12 +464,36 @@ the player stops loading, turn off *Restore muted audio* and reload.
 
 ---
 
+## Testing
+
+The tests run the real extension on live Twitch VODs (found at run time,
+since VODs age), in Chrome for Testing and Firefox.
+
+```bash
+cd test
+npm install
+npx playwright install chromium   # once
+node twitch-check.cjs             # does Twitch still work as expected? (20 s)
+node run.cjs --quick              # main tests (≈ 4 min)
+node run.cjs                      # everything, Chromium + Firefox (≈ 15 min)
+node run.cjs two-tabs backup      # only some tests
+```
+
+Every test also fails if the extension writes a warning or an error to the
+console (page or player) that the test doesn't expect. See
+[RELEASE.md](RELEASE.md) for the release checklist.
+
+---
+
 ## Project files
 
 ```
 CHANGELOG.md           What changed in each version
 PLAN-1.3.md            Work plan for 1.3: bug fixes, reliability, features, tests
 ROADMAP.md             Later ideas, and ideas considered but not planned
+RELEASE.md             Release checklist
+test/                  Browser tests (run.cjs), Twitch change detector
+                       (twitch-check.cjs), test fixtures
 build.mjs              Builds dist/ for Chrome and Firefox (folders + zips)
 manifest.json          Extension manifest (Manifest V3, Chrome + Firefox)
 src/hook.js            Runs in the page and in the player's worker: playlists,

@@ -180,6 +180,11 @@ from saved VODs replace it. See CHANGELOG.md.
 
 ## Phase 4: testing and release
 
+**Status: done.** `test/run.cjs` runs 16 Chromium tests plus a Firefox
+smoke test on live VODs. All 17 pass (≈ 6 min). `test/twitch-check.cjs`
+checks Twitch in 20 s (9/9 pass), and `RELEASE.md` has the checklist.
+`web-ext run` wasn't needed: Firefox is driven with Selenium + geckodriver.
+
 **Do the tests read the console?** Until now, only partly. Some test scripts
 printed the extension's own messages from the player, but none collected
 *every* console message or failed on warnings and errors. And since they all

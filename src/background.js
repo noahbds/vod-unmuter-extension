@@ -87,6 +87,7 @@ async function findWork(channels, state, force) {
         Object.assign(rec, { title: v.title, live, endedAt: live ? null : endedAt });
         if (rec.done) continue;
         if (!force && rec.lastRun && now - rec.lastRun < RETRY_MINUTES * 6e4) continue;
+        if (!force && rec.retryAfter && now < rec.retryAfter) continue;
         work.push(v.id);
       }
     } catch (e) {
@@ -182,13 +183,19 @@ async function check(force) {
 // ------------------------------------------------------------------ badge
 // The toolbar icon shows "…" while auto-save runs and "!" when something
 // needs attention (an error on a channel or VOD).
+// A subscriber-only VOD without a subscription is expected, not a problem.
+const SUB_ONLY = /subscriber-only/i;
+const isProblem = (err) => !!err && !SUB_ONLY.test(err);
+
 async function refreshBadge() {
   if (!api.action) return;
   const { autoState } = await api.storage.local.get({ autoState: EMPTY_STATE });
+  const { autoChannels } = await api.storage.sync.get({ autoChannels: [] });
   const { autoBusyUntil } = await session.get({ autoBusyUntil: 0 });
-  const vods = Object.values(autoState.vods || {});
-  const problem = Object.values(autoState.channels || {}).some((c) => c.error) ||
-    vods.some((v) => v.error && v.lastRun && Date.now() - v.lastRun < 36 * 36e5) || !!autoState.note;
+  // Only channels still in the list count.
+  const vods = Object.values(autoState.vods || {}).filter((v) => autoChannels.includes(v.channel));
+  const problem = autoChannels.some((c) => isProblem((autoState.channels[c] || {}).error)) ||
+    vods.some((v) => isProblem(v.error) && v.lastRun && Date.now() - v.lastRun < 36 * 36e5) || !!autoState.note;
   const running = autoBusyUntil > Date.now() || vods.some((v) => v.running);
   const text = problem ? '!' : running ? '…' : '';
   try {
@@ -197,7 +204,18 @@ async function refreshBadge() {
     await api.action.setTitle({ title: problem ? 'VOD Unmuter: auto-save needs attention (open the menu)' : running ? 'VOD Unmuter: auto-saving…' : 'VOD Unmuter' });
   } catch (e) { /* ignore */ }
 }
-api.storage.onChanged.addListener((changes) => { if (changes.autoState) refreshBadge(); });
+api.storage.onChanged.addListener((changes, area) => {
+  if (changes.autoState) refreshBadge();
+  // A channel was removed from auto-save: forget its VODs and their errors.
+  if (area === 'sync' && changes.autoChannels) {
+    const list = changes.autoChannels.newValue || [];
+    updateState((state) => {
+      for (const c of Object.keys(state.channels)) if (!list.includes(c)) delete state.channels[c];
+      for (const [id, v] of Object.entries(state.vods)) if (v.channel && !list.includes(v.channel)) delete state.vods[id];
+      if (!list.length) state.note = '';
+    }).then(refreshBadge);
+  }
+});
 api.runtime.onStartup.addListener(refreshBadge);
 
 // ------------------------------------------------------------------ notifications
@@ -245,6 +263,9 @@ function recordResult(result) {
     // stream, so keep looking for a while (one small playlist request).
     const justEnded = rec.endedAt && Date.now() - rec.endedAt < MUTE_LATE_HOURS * 36e5;
     if (result.ok && !rec.live && rec.saved >= rec.restorable && !(rec.muted === 0 && justEnded)) rec.done = true;
+    // Subscriber-only without a subscription: retrying every 15 minutes won't
+    // change that. Try again only every 3 hours (in case you subscribe).
+    rec.retryAfter = !result.ok && SUB_ONLY.test(result.error || '') ? Date.now() + 3 * 36e5 : 0;
   });
 }
 

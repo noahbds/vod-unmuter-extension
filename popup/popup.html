@@ -7,155 +7,136 @@
 </head>
 <body>
   <header>
-    <img src="../icons/icon-48.png" alt="" width="28" height="28">
+    <img src="../icons/icon-48.png" alt="" width="24" height="24">
     <h1>VOD Unmuter</h1>
+    <button type="button" id="statusDot" class="status-dot" data-goto="help" title="Checking…" aria-label="Status: checking"></button>
   </header>
 
-  <h2>Unmuting</h2>
+  <nav role="tablist" aria-label="Sections">
+    <button type="button" role="tab" id="tab-settings" aria-controls="panel-settings" data-tab="settings">Settings</button>
+    <button type="button" role="tab" id="tab-auto" aria-controls="panel-auto" data-tab="auto">Auto-save</button>
+    <button type="button" role="tab" id="tab-saved" aria-controls="panel-saved" data-tab="saved">Saved <span id="savedCount" class="count"></span></button>
+    <button type="button" role="tab" id="tab-help" aria-controls="panel-help" data-tab="help">Help</button>
+  </nav>
 
-  <label class="row">
-    <span>
-      <strong>Restore muted audio</strong>
-      <small>Use Twitch's original audio when it still exists</small>
-    </span>
-    <input type="checkbox" id="enabled" data-reload>
-  </label>
-
-  <label class="row">
-    <span>
-      <strong>Counter in the player</strong>
-      <small>Next to the settings button: how many muted parts were unmuted</small>
-    </span>
-    <input type="checkbox" id="badge">
-  </label>
-
-  <label class="row">
-    <span>
-      <strong>Green seek bar</strong>
-      <small>Unmuted parts in green, details on hover</small>
-    </span>
-    <input type="checkbox" id="recolor">
-  </label>
-
-  <h2>Save audio for later</h2>
-
-  <label class="row">
-    <span>
-      <strong>Save audio for later</strong>
-      <small>Twitch deletes the originals about a day after a stream. Keep their sound on this computer so the VOD stays unmuted.</small>
-    </span>
-    <input type="checkbox" id="saveAudio">
-  </label>
-
-  <div class="row sub" data-needs="saveAudio">
-    <label for="saveMode">
-      <strong>What to save</strong>
-      <small id="saveModeHelp"></small>
+  <!-- Settings: the player, then saving -->
+  <section role="tabpanel" id="panel-settings" aria-labelledby="tab-settings">
+    <h2>In the player</h2>
+    <label class="row" title="Plays Twitch's original sound in muted parts, while Twitch still has it">
+      <span><strong>Restore muted audio</strong></span>
+      <input type="checkbox" id="enabled" data-reload>
     </label>
-    <select id="saveMode">
-      <option value="whole">Whole VOD</option>
-      <option value="watched">Parts I play</option>
-    </select>
-  </div>
-
-  <div class="row sub" data-needs="saveAudio">
-    <label for="saveQuality">
-      <strong>Saved quality</strong>
-      <small id="saveQualityHelp"></small>
+    <label class="row" title="Next to the player's settings button: how many muted parts were unmuted">
+      <span><strong>Counter</strong></span>
+      <input type="checkbox" id="badge">
     </label>
-    <select id="saveQuality">
-      <option value="original">Original</option>
-      <option value="high">High</option>
-      <option value="small">Small</option>
-    </select>
-  </div>
-
-  <div class="row sub" data-needs="saveAudio">
-    <label for="maxStorageMB">
-      <strong>Storage limit</strong>
-      <small>When full, the oldest saved VODs are deleted first</small>
+    <label class="row" title="Unmuted parts in green, still muted in red; hover one for details">
+      <span><strong>Green seek bar</strong></span>
+      <input type="checkbox" id="recolor">
     </label>
-    <select id="maxStorageMB">
-      <option value="250">250 MB</option>
-      <option value="500">500 MB</option>
-      <option value="1000">1 GB</option>
-      <option value="2000">2 GB</option>
-      <option value="5000">5 GB</option>
-      <option value="0">No limit</option>
-    </select>
-  </div>
 
-  <div class="row sub" data-needs="saveAudio">
-    <label for="keepDays">
-      <strong>Delete saved audio after</strong>
-      <small>Twitch keeps VODs up to 60 days</small>
+    <h2>Saving</h2>
+    <label class="row">
+      <span>
+        <strong>Save audio for later</strong>
+        <small>So VODs stay unmuted after Twitch deletes the sound</small>
+      </span>
+      <input type="checkbox" id="saveAudio">
     </label>
-    <select id="keepDays">
-      <option value="7">7 days</option>
-      <option value="30">30 days</option>
-      <option value="60">60 days</option>
-      <option value="180">6 months</option>
-      <option value="0">Never</option>
-    </select>
-  </div>
+    <div class="row sub" data-needs="saveAudio">
+      <label for="saveMode"><strong>What</strong><small id="saveModeHelp"></small></label>
+      <select id="saveMode">
+        <option value="whole">Whole VOD</option>
+        <option value="unplayed">Parts ahead of me</option>
+      </select>
+    </div>
+    <div class="row sub" data-needs="saveAudio">
+      <label for="saveQuality"><strong>Quality</strong><small id="saveQualityHelp"></small></label>
+      <select id="saveQuality">
+        <option value="original">Original</option>
+        <option value="high">High</option>
+        <option value="small">Small</option>
+      </select>
+    </div>
+    <div class="row sub" data-needs="saveAudio" title="When full, the oldest saved VODs are deleted first (pinned ones are kept)">
+      <label for="maxStorageMB"><strong>Storage limit</strong></label>
+      <select id="maxStorageMB">
+        <option value="250">250 MB</option>
+        <option value="500">500 MB</option>
+        <option value="1000">1 GB</option>
+        <option value="2000">2 GB</option>
+        <option value="5000">5 GB</option>
+        <option value="0">No limit</option>
+      </select>
+    </div>
+    <div class="row sub" data-needs="saveAudio" title="Twitch keeps VODs up to 60 days. Pinned VODs are kept">
+      <label for="keepDays"><strong>Keep for</strong></label>
+      <select id="keepDays">
+        <option value="7">7 days</option>
+        <option value="30">30 days</option>
+        <option value="60">60 days</option>
+        <option value="180">6 months</option>
+        <option value="0">Always</option>
+      </select>
+    </div>
+    <p class="note" id="note" hidden>Reload the VOD for this to take effect.</p>
+  </section>
 
-  <h2 class="split" data-needs="saveAudio">
-    <span>Auto-save channels</span>
-    <button type="button" id="checkNow">Check now</button>
-  </h2>
-  <p class="muted small" data-needs="saveAudio">
-    New VODs from these channels are saved without playing them, while Twitch
-    still has the sound. Checked every 20 minutes.
-  </p>
-  <form id="addChannel" class="add" data-needs="saveAudio">
-    <input id="channelInput" type="text" placeholder="Channel name"
-           autocomplete="off" spellcheck="false" aria-label="Channel to auto-save">
-    <button type="submit">Add</button>
-  </form>
-  <p id="channelError" class="error" hidden></p>
-  <div id="channels" class="saved" data-needs="saveAudio"></div>
-  <label class="row" data-needs="saveAudio">
-    <span>
-      <strong>Open a Twitch tab if needed</strong>
-      <small>When no Twitch tab is open, briefly open one in the background to save</small>
-    </span>
-    <input type="checkbox" id="autoOpenTab">
-  </label>
-  <label class="row" data-needs="saveAudio">
-    <span>
-      <strong>Notifications</strong>
-      <small>When auto-save saves a VOD, or can't</small>
-    </span>
-    <input type="checkbox" id="notify">
-  </label>
-  <div id="suggest" class="suggest" data-needs="saveAudio" hidden></div>
-  <p id="autoNote" class="muted small" hidden></p>
+  <!-- Auto-save -->
+  <section role="tabpanel" id="panel-auto" aria-labelledby="tab-auto" hidden>
+    <p class="intro" data-needs="saveAudio">New VODs from these channels are saved in the background, while Twitch still has the sound.</p>
+    <p class="intro off-note" data-off="saveAudio" hidden>Turn on <b>Save audio for later</b> in Settings to use auto-save.</p>
+    <form id="addChannel" class="add" data-needs="saveAudio">
+      <input id="channelInput" type="text" placeholder="Channel name or twitch.tv link"
+             autocomplete="off" spellcheck="false" aria-label="Channel to auto-save">
+      <button type="submit">Add</button>
+    </form>
+    <p id="channelError" class="error" hidden></p>
+    <div id="suggest" class="suggest" data-needs="saveAudio" hidden></div>
+    <div id="channels" class="list" data-needs="saveAudio"></div>
+    <p id="autoNote" class="note" hidden></p>
+    <div class="row-actions" data-needs="saveAudio">
+      <small class="muted">Checked every 20 minutes</small>
+      <button type="button" id="checkNow">Check now</button>
+    </div>
+    <h2 data-needs="saveAudio">Options</h2>
+    <label class="row" data-needs="saveAudio" title="When no Twitch tab is open, briefly open twitch.tv/robots.txt in the background to save">
+      <span><strong>Open a Twitch tab if needed</strong></span>
+      <input type="checkbox" id="autoOpenTab">
+    </label>
+    <label class="row" data-needs="saveAudio">
+      <span><strong>Notifications</strong><small>When a VOD is saved, or can't be</small></span>
+      <input type="checkbox" id="notify">
+    </label>
+  </section>
 
-  <h2 class="split">
-    <span>Saved audio</span>
-    <span class="buttons">
-      <button type="button" id="backup" title="Export saved audio to a file, or import a backup">Back up…</button>
+  <!-- Saved audio -->
+  <section role="tabpanel" id="panel-saved" aria-labelledby="tab-saved" hidden>
+    <div id="storage" class="storage"></div>
+    <div class="row-actions">
+      <button type="button" id="backup" title="Export saved audio to a file, or import a backup">Back up / restore…</button>
       <button type="button" id="deleteAll" class="danger" hidden>Delete all</button>
-    </span>
-  </h2>
-  <div id="saved" class="saved" aria-live="polite">
-    <p class="muted">Loading…</p>
-  </div>
+    </div>
+    <div id="saved" class="list" aria-live="polite"><p class="muted">Loading…</p></div>
+  </section>
 
-  <h2 class="split">
-    <span>Troubleshooting</span>
-    <button type="button" id="copyDiag" title="Copy a report to paste in a GitHub issue">Copy diagnostic report</button>
-  </h2>
-  <p id="status" class="muted small" aria-live="polite">Status: checking…</p>
-  <label class="row">
-    <span>
-      <strong>Debug logging</strong>
-      <small>Every check, splice and save in the console (F12)</small>
-    </span>
-    <input type="checkbox" id="debug">
-  </label>
-
-  <p class="note" id="note" hidden>Reload the VOD for this to take effect.</p>
+  <!-- Help -->
+  <section role="tabpanel" id="panel-help" aria-labelledby="tab-help" hidden>
+    <div id="status" class="status-box" aria-live="polite">Status: checking…</div>
+    <div class="row-actions">
+      <small class="muted">Something wrong? Paste this in an issue</small>
+      <button type="button" id="copyDiag" title="Copy a diagnostic report to paste in a GitHub issue">Copy report</button>
+    </div>
+    <label class="row">
+      <span><strong>Debug logging</strong><small>Every check, splice and save in the console (F12)</small></span>
+      <input type="checkbox" id="debug">
+    </label>
+    <ul class="links">
+      <li><a href="welcome.html" target="_blank">What the extension can and can't do</a></li>
+      <li><a href="https://github.com/noahbds/vod-unmuter-extension#readme" target="_blank" rel="noopener">Full guide</a></li>
+      <li><a href="https://github.com/noahbds/vod-unmuter-extension/issues" target="_blank" rel="noopener">Report a problem</a></li>
+    </ul>
+  </section>
 
   <script src="popup.js"></script>
 </body>

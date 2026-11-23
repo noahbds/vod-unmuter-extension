@@ -2,6 +2,53 @@
 
 ## 1.3.0 (in progress: not released yet)
 
+**"Parts ahead of me"** replaces "Parts I play" in *What to save*. Only the
+muted parts ahead of where you are are kept: once you've played 20 s at a
+position, the saved copies of every part before it (watched or skipped, e.g.
+when you jump to where you stopped yesterday) are removed, and a part you
+watch through is removed too. The furthest position is remembered per VOD.
+Parts behind the player's position are never downloaded in the first place:
+saving waits for the position (up to 15 s), then goes forward from it, nearest
+first, and rewinding saves the parts that are ahead again. Tested: opening a
+VOD 60 s before its last muted stretch saved only the 4 parts ahead (of 108). "Watched" follows the video's real
+position (not what the player buffers ahead, not ads). Tested: 48 s watched
+inside a muted stretch → 4 copies removed (94 → 90). A setting of "Parts I
+play" switches to it. Hovering a part of the seek bar now also says whether
+it has a **saved copy** ("yes", "14 of 18 segments, 4 removed after you
+watched them", "none", …).
+
+Fix: **auto-save errors stayed after removing the channel** (e.g. "1 problem:
+subscriber-only" forever). Removing a channel now forgets its VODs and
+errors. A subscriber-only VOD without a subscription is no longer a
+"problem" (red status, "!" on the icon): it's a note, and the channel's line
+says "needs a subscription to save". It's retried every 3 hours instead of
+every 15 minutes.
+
+Redesigned menu: four tabs instead of one long page.
+- **Settings:** the player, then saving.
+- **Auto-save:** channels and options.
+- **Saved:** a storage bar, then one collapsible group per channel, one line
+  per VOD.
+- **Help:** status, diagnostic report, debug logging, links.
+
+Texts are shorter (details on hover), the header has a status dot (green or
+red), and dropdowns no longer stretch the labels into several lines. The
+menu remembers the last tab.
+
+Phase 4, tests (for development, not in the extension):
+
+- `test/run.cjs` runs the real extension on live Twitch VODs (found at run
+  time) in Chrome for Testing and Firefox. There are 16 Chromium tests,
+  covering every fix and feature of 1.3 (two tabs, another extension, a second
+  player, growing playlists, network errors, old VODs, embedded player,
+  storage full, backup, menu, auto-save, "Not active", live checking,
+  first-run page), plus a Firefox test. Every test also fails on any
+  extension warning or error in the console. All 17 pass.
+- `test/twitch-check.cjs`: a 20-second check that Twitch still works the way
+  the extension relies on (token, playlists, file naming, which sites get the
+  originals, "deleted" answers, muted ranges).
+- `RELEASE.md`: release checklist.
+
 Phase 3, features:
 
 - **Live checking.** The seek bar fills in while VOD parts are checked (grey =
@@ -27,19 +74,22 @@ Phase 3, features:
   requests), and reading them from the page would break with every redesign.
   The suggestions above are the substitute.
 
-Fix: **counter counting parts that aren't muted any more** (e.g. 496 instead
-of 420 on a VOD watched since it was live). Twitch reprocesses the muting
-during and after a stream; parts it unmutes are now dropped from the count
-(and the seek bar) as soon as the playlist changes, instead of staying
-forever. Tested: 30 parts unmuted by Twitch → 94 / 108 became 64 / 78
-(the previous build stayed at 94 / 108). Seek bar parts with an invalid
-position are skipped instead of producing "NaN%" warnings, and the cause is
-logged once.
+Fix: **counter showing another tab's VOD** (e.g. 416/420 then 496/496 after
+changing a setting). The extension's parts talk over a channel that every
+twitch.tv tab shares, so a tab could show the result of a VOD open in another
+tab, and every setting change made all tabs answer at once. Every message now
+says which tab it comes from, and the counter only listens to its own tab.
+Tested with two tabs on different VODs: the previous build showed the other
+tab's 0 / 205 instead of 94 / 108; the fixed one never does.
 
-Fix: **counter switching to another result (e.g. 416/420 ↔ 496/496)** when
-another extension (like TwitchNoSub) runs a second player. Each copy of the
-extension now says whether it is really downloading the video, and the counter
-follows only that one.
+Also more robust:
+- If another extension starts a second player worker in the same tab, the
+  counter follows the copy that really downloads the video.
+- If Twitch changes which parts of a VOD are muted while you watch, parts it
+  no longer mutes leave the count (tested: 30 parts unmuted, 94 / 108 →
+  64 / 78).
+- Seek bar parts with an invalid position are skipped instead of producing
+  "NaN%" warnings, and the cause is logged once.
 
 Phase 2, explanations and reliability:
 
