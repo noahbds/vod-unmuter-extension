@@ -39,6 +39,10 @@
     const CHANNEL = 'vod-unmuter';
     const IS_PAGE = typeof scope.document !== 'undefined'; // vs. the player worker
     const WHERE = IS_PAGE ? 'page' : 'player';
+    // Each copy of the hook has an id: another extension can start a second
+    // player worker, and the UI must follow the copy that really plays.
+    const INSTANCE = Math.random().toString(36).slice(2, 10);
+    const PLAYING_MS = 10 * 60 * 1000; // "playing" = downloaded a segment of it in the last 10 min
     // Twitch's video servers refuse the original files of muted parts (403)
     // to requests from the embedded player and the mobile site, while serving
     // them to www.twitch.tv (measured: same file, only the Origin differs).
@@ -649,6 +653,32 @@
       });
     }
 
+    // Changes fields of a saved VOD's record (not its audio). Returns false
+    // when the VOD has nothing saved.
+    async function updateVodInfo(vod, fields) {
+      try {
+        return await idb('vods', 'readwrite', (vods, out) => {
+          const r = vods.get(vod);
+          r.onsuccess = () => {
+            if (!r.result) { out.value = false; return; }
+            vods.put(Object.assign(r.result, fields));
+            out.value = true;
+          };
+        });
+      } catch (e) { log('warn', 'could not update saved VOD info', e); return false; }
+    }
+
+    // Once a VOD is checked, its saved record learns how much of it was muted
+    // and could be restored, so the menu can say "182 / 204 saved" and why.
+    function noteVodTotals(job) {
+      if (job.skipped && !job.saved.size) return;
+      updateVodInfo(job.vodKey, {
+        muted: job.segs.length,
+        restorable: job.segs.filter((x) => x.source).length,
+        checkedAt: Date.now(),
+      });
+    }
+
     async function listSaved() {
       return (await idb('vods', 'readonly', (vods, out) => {
         const r = vods.getAll();
@@ -660,7 +690,7 @@
       expireGone();
       if (!keepDays) return; // 0 = keep forever
       const limit = Date.now() - keepDays * 864e5;
-      for (const v of await listSaved()) if (v.savedAt < limit) await deleteSavedVod(v.vod);
+      for (const v of await listSaved()) if (v.savedAt < limit && !v.pinned) await deleteSavedVod(v.vod);
     }
 
     // ---- backup files ------------------------------------------------------
@@ -787,6 +817,7 @@
       scope.__vodUnmuterStore = {
         list: listSaved, remove: deleteSavedVod, expire: expireSaved,
         exportSaved, importSaved, readBackupHeader, clearGone,
+        pin: (vod, pinned) => updateVodInfo(vod, { pinned: !!pinned }),
       };
     }
     if (IS_PAGE) scope.__vodUnmuterAuto = { save: (vodId) => autoSave(vodId) };
@@ -939,9 +970,11 @@
       for (const s of segs) {
         const restored = !!s.source;
         const reason = reasonOf(s);
-        const contiguous = cur && Math.abs(cur.end - s.start) < 0.5 && cur.restored === restored;
+        // Ranges split where the color changes: restored / waiting / muted.
+        const kind = restored ? 'ok' : reason === 'checking' ? 'pending' : reason === 'network' ? 'wait' : 'no';
+        const contiguous = cur && Math.abs(cur.end - s.start) < 0.5 && cur.kind === kind;
         if (!contiguous) {
-          cur = { start: s.start, end: s.start, segments: 0, restored, sources: new Map(), reasons: {} };
+          cur = { start: s.start, end: s.start, segments: 0, restored, kind, sources: new Map(), reasons: {} };
           ranges.push(cur);
         }
         cur.end = s.start + s.duration;
@@ -955,7 +988,7 @@
         }
       }
       return ranges.map((r) => ({
-        start: r.start, end: r.end, segments: r.segments, restored: r.restored,
+        start: r.start, end: r.end, segments: r.segments, restored: r.restored, kind: r.kind,
         sources: [...r.sources.values()].sort((a, b) => b.segments - a.segments),
         reasons: r.reasons,
       }));
@@ -980,7 +1013,7 @@
       if (IS_PAGE) return; // the page copy doesn't play: playlists it sees say nothing about the player
       const before = currentJob || (noneCurrent ? null : jobs.filter((j) => !j.auto).pop());
       if (!before || before.vodBase === vodBase) return;
-      post({ type: 'none', vod: before.vod });
+      post({ type: 'none', vod: before.vod, instance: INSTANCE });
       if (job) { makeCurrent(job); sendState(job); } else { currentJob = null; noneCurrent = true; }
     }
 
@@ -991,6 +1024,9 @@
       if (!/\.ts(\?|$)/.test(url)) return;
       for (const job of jobs) {
         if (url.startsWith(job.base)) {
+          const wasPlaying = job.lastSegmentAt && Date.now() - job.lastSegmentAt < PLAYING_MS;
+          job.lastSegmentAt = Date.now();
+          if (!wasPlaying && currentJob === job) sendState(job); // tell the UI this copy plays
           if (currentJob !== job) {
             makeCurrent(job);
             sendState(job);
@@ -1001,7 +1037,9 @@
       }
     }
 
-    function sendResult(job) {
+    // `checking`: sent while the check runs, with what is known so far (the
+    // seek bar and the panel fill in live).
+    function sendResult(job, checking) {
       let restored = 0, fromOther = 0, fromSaved = 0, mutedSeconds = 0, restoredSeconds = 0, saved = 0, unknown = 0;
       for (const s of job.segs) {
         mutedSeconds += s.duration;
@@ -1015,7 +1053,9 @@
       }
       if (isCurrent(job)) {
         post({
-          type: 'result', key: job.key, vod: job.vod, vodKey: job.vodKey,
+          type: checking ? 'checking' : 'result', key: job.key, vod: job.vod, vodKey: job.vodKey,
+          instance: INSTANCE, playing: !!job.lastSegmentAt && Date.now() - job.lastSegmentAt < PLAYING_MS,
+          done: job.done, found: job.found, sample: job.sample || null, allGoneAfterH: ALL_GONE_AFTER_H,
           quality: prettyQuality(job.dir), total: job.total,
           muted: job.segs.length, restored, fromOther, fromSaved, mutedSeconds, restoredSeconds,
           skipped: job.skipped || 0, unknown,
@@ -1036,14 +1076,7 @@
     }
 
     function sendState(job) {
-      if (job.finished) sendResult(job);
-      else if (isCurrent(job)) {
-        post({
-          type: 'checking', key: job.key, vod: job.vod, quality: prettyQuality(job.dir),
-          muted: job.segs.length, done: job.done, found: job.found, sample: job.sample || null,
-          endedAt: job.endedAt || null, allGoneAfterH: ALL_GONE_AFTER_H,
-        });
-      }
+      sendResult(job, !job.finished);
     }
 
     function throttledProgress(job) {
@@ -1112,6 +1145,7 @@
     async function checkMore(job, segs) {
       await checkSegments(job, segs, null);
       sendResult(job);
+      noteVodTotals(job);
       // Save the new ones too (or right after a save that is running now).
       if (job.saving) job.saveAgain = true;
       else job.savedAll = false;
@@ -1146,6 +1180,7 @@
         job.done = job.segs.length;
       }
       job.finished = true;
+      noteVodTotals(job);
       const restored = sendResult(job);
       const unknown = job.segs.filter((x) => !x.source && x.unknown).length;
       const gone = job.segs.length - restored - unknown;
@@ -1195,7 +1230,7 @@
       const all = await listSaved();
       let total = all.reduce((n, v) => n + v.bytes, 0) + incoming;
       if (total <= limit) return true;
-      for (const v of all.filter((x) => x.vod !== job.vodKey).sort((a, b) => a.savedAt - b.savedAt)) {
+      for (const v of all.filter((x) => x.vod !== job.vodKey && !x.pinned).sort((a, b) => a.savedAt - b.savedAt)) {
         if (total <= limit) break;
         await deleteSavedVod(v.vod);
         total -= v.bytes;
@@ -1514,6 +1549,23 @@
         time += duration;
         duration = 0;
       }
+      if (existing) {
+        // Twitch reprocesses the muting (while live, and again after the
+        // stream): parts that aren't muted any more play normally from
+        // Twitch, so they leave the job instead of being counted forever.
+        const stillMuted = new Set();
+        for (const raw of text.split('\n')) { const m = raw.trim().match(MUTED_RE); if (m) stillMuted.add(Number(m[2])); }
+        const kept = job.segs.filter((x) => stillMuted.has(x.num));
+        const removed = job.segs.length - kept.length;
+        if (removed) {
+          for (const x of job.segs) if (!stillMuted.has(x.num)) segments.delete(x.urls['.ts']);
+          job.segs = kept;
+          job.done = kept.filter((x) => x.source !== undefined).length;
+          job.found = kept.filter((x) => x.source).length;
+          log('info', `${jobName(job)}: Twitch changed the muted parts: ${removed} no longer muted, ${added.length} newly muted, ${kept.length} now`);
+          scheduleResult(job);
+        }
+      }
       if (!job.segs.length) return null;
       job.total = time;
       const out = { text: lines.join('\n'), raw: text, job };
@@ -1736,7 +1788,20 @@
         if (text.includes('#EXT-X-STREAM-INF')) { readMaster(text, playlistUrl); return res; }
         const clean = playlistUrl.split('?')[0];
         const vodBase = clean.slice(0, clean.lastIndexOf('/', clean.lastIndexOf('/') - 1) + 1);
-        if (!text.includes('-muted.ts')) { switchVod(vodBase, null); return res; }
+        if (!text.includes('-muted.ts')) {
+          if (entry && jobs.includes(entry.job)) {
+            // Twitch unmuted every part of this VOD: forget the old job.
+            log('info', `${jobName(entry.job)}: Twitch no longer mutes any part of this VOD`);
+            jobs.splice(jobs.indexOf(entry.job), 1);
+            for (const x of entry.job.segs) segments.delete(x.urls['.ts']);
+            playlists.delete(playlistUrl);
+            post({ type: 'none', vod: entry.job.vod, instance: INSTANCE });
+            if (currentJob === entry.job) currentJob = null;
+            return res;
+          }
+          switchVod(vodBase, null);
+          return res;
+        }
         if (RESTRICTED) {
           const muted = (text.match(/-muted\.ts/g) || []).length;
           if (!restrictedNoted.has(vodBase)) { restrictedNoted.add(vodBase); log('info', `${muted} muted segments: Twitch only gives the original sound to www.twitch.tv, not to ${ORIGIN}`); }
@@ -1891,6 +1956,9 @@
     }
     if (request.action === 'delete' && request.vodKey) await forget(request.vodKey);
     else if (request.action === 'deleteAll') for (const v of await store.list()) await forget(v.vod);
+    else if (request.action === 'deleteChannel' && request.channel) {
+      for (const v of await store.list()) if (v.channel === request.channel && !v.pinned) await forget(v.vod);
+    } else if (request.action === 'pin' && request.vodKey) await store.pin(request.vodKey, request.pinned);
     let usage = null;
     try { usage = await navigator.storage.estimate(); } catch (e) { /* ignore */ }
     return { vods: await store.list(), quota: usage && usage.quota };

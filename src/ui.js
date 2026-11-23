@@ -15,7 +15,12 @@
   let vodSince = Date.now();      // when this VOD page was opened
   let playerHellos = 0;           // hook instances inside Twitch's player that said hello
   const UNREACHABLE_AFTER_MS = 12000;
-  let mutedSeenSince = 0;         // since when Twitch shows muted parts without word from the player
+  let mutedSeenSince = 0;
+  // The hook copy that really plays this VOD (it downloads its segments).
+  // Other copies (e.g. a second player worker started by another extension)
+  // may know an older playlist: their messages are ignored once it's known.
+  let owner = null;
+  let badRangesLogged = false;         // since when Twitch shows muted parts without word from the player
 
   // ---------------------------------------------------------------- helpers
   function currentVodId() {
@@ -45,7 +50,7 @@
   // audio lives in twitch.tv's storage, so export and import happen on a
   // twitch.tv page (a popup also can't keep a file picker open in Firefox).
   if (location.hostname === 'www.twitch.tv' && location.pathname === '/robots.txt' &&
-      location.hash === '#vod-unmuter-backup' && window === window.top) {
+      location.hash.startsWith('#vod-unmuter-backup') && window === window.top) {
     const start = () => renderBackupPage().catch((e) => { document.body.textContent = String(e); });
     if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start); else start();
     return;
@@ -91,7 +96,9 @@
       if (!vods.length) { exportBox.append(h('p', { class: 'muted' }, 'Nothing saved yet.')); return; }
       const boxes = vods.map((v) => {
         const cb = h('input', { type: 'checkbox', 'data-vod': v.vod });
-        cb.checked = true;
+        // "&vod=<folder>": opened from one VOD's export button: only that one.
+        const only = (location.hash.match(/[&?]vod=([^&]+)/) || [])[1];
+        cb.checked = !only || decodeURIComponent(only) === v.vod;
         exportBox.append(h('label', { class: 'vod' }, cb, h('span', null,
           h('b', null, v.channel || 'Unknown channel'), ` · streamed ${dayText(v.streamedAt)}`,
           h('small', null, `${v.segments} segments · ${mbText(v.bytes)}`))));
@@ -412,6 +419,7 @@
     .vu-bar { position: absolute; top: 0; bottom: 0; min-width: 2px; }
     .vu-bar.vu-ok { background: linear-gradient(90deg, #dcfce7 var(--vu-played, 0%), rgba(34, 197, 94, 0.9) var(--vu-played, 0%)); }
     .vu-bar.vu-no { background: linear-gradient(90deg, #fde2e2 var(--vu-played, 0%), rgba(232, 72, 72, 0.85) var(--vu-played, 0%)); }
+    .vu-bar.vu-pending { background: linear-gradient(90deg, #e4e4e7 var(--vu-played, 0%), rgba(161, 161, 170, 0.75) var(--vu-played, 0%)); }
     .vu-bar.vu-wait { background: linear-gradient(90deg, #fef3c7 var(--vu-played, 0%), rgba(250, 204, 21, 0.85) var(--vu-played, 0%)); }
     /* Twitch's position marker stays above the colored parts */
     html.vu-recolor .seekbar-bar > span:not(.seekbar-segment) { z-index: 2; }
@@ -581,36 +589,43 @@
       return;
     }
 
-    if (state.type === 'checking') {
-      const pct = Math.round(((state.done || 0) / state.muted) * 100);
-      const sample = state.sample && state.sample.size && state.sample.done >= state.sample.size ? state.sample : null;
-      const looksGone = !!sample && !sample.found;
-      badge.append(h('button', { class: 'vu-btn' + (looksGone ? ' vu-gone' : ''), title: checkingText(state, sample) },
-        looksGone ? h('span', { class: 'vu-no-c' }, speakerIcon(false)) : h('div', { class: 'vu-spin' }),
-        `${pct}%`));
-      return;
-    }
-
+    const checking = state.type === 'checking';
     const { restored, muted } = state;
     const cls = restored === muted ? 'vu-ok-c' : restored ? 'vu-part-c' : 'vu-no-c';
     const pct = state.mutedSeconds ? Math.round((state.restoredSeconds / state.mutedSeconds) * 100) : 0;
 
-    const button = h('button', {
-      class: 'vu-btn', 'aria-haspopup': 'true',
-      'aria-label': `Unmuted ${restored} of ${muted} muted segments`, onclick: toggle,
-    }, h('span', { class: cls }, speakerIcon(restored > 0)),
-      h('span', null, restored, h('span', { class: 'vu-of' }, ` / ${muted}`)));
+    let button;
+    if (checking) {
+      const done = Math.round(((state.done || 0) / state.muted) * 100);
+      const sample = state.sample && state.sample.size && state.sample.done >= state.sample.size ? state.sample : null;
+      const looksGone = !!sample && !sample.found;
+      button = h('button', { class: 'vu-btn' + (looksGone ? ' vu-gone' : ''), title: checkingText(state, sample), 'aria-haspopup': 'true', onclick: toggle },
+        looksGone ? h('span', { class: 'vu-no-c' }, speakerIcon(false)) : h('div', { class: 'vu-spin' }),
+        `${done}%`);
+    } else {
+      button = h('button', {
+        class: 'vu-btn', 'aria-haspopup': 'true',
+        'aria-label': `Unmuted ${restored} of ${muted} muted segments`, onclick: toggle,
+      }, h('span', { class: cls }, speakerIcon(restored > 0)),
+        h('span', null, restored, h('span', { class: 'vu-of' }, ` / ${muted}`)));
+    }
+    if (!state.ranges) { badge.append(button); return; }
 
     const panel = h('div', { class: 'vu-panel', onclick: (e) => e.stopPropagation() },
       h('div', { class: 'vu-panel-inner' },
-        verdictBox(state),
+        checking
+          ? h('div', { class: 'vu-verdict' }, h('div', { class: 'vu-verdict-line vu-wait' },
+              checkingText(state, state.sample && state.sample.done >= state.sample.size ? state.sample : null).split('\n\n').join(' ')))
+          : verdictBox(state),
         h('div', { class: 'vu-stats' },
           state.quality ? [h('span', null, 'Quality'), h('span', null, state.quality)] : null,
           h('span', null, 'Muted segments'), h('span', null, muted),
           h('span', null, 'Unmuted'), h('span', { class: 'vu-ok-c' }, restored),
           state.fromOther ? [h('span', null, '…using other qualities'), h('span', null, state.fromOther)] : null,
           state.fromSaved ? [h('span', null, '…using your saved copy'), h('span', null, state.fromSaved)] : null,
-          h('span', null, 'Still muted'), h('span', { class: muted - restored ? 'vu-no-c' : '' }, muted - restored),
+          checking ? [h('span', null, 'Checked so far'), h('span', null, `${state.done || 0} / ${muted}`)] : null,
+          h('span', null, checking ? 'Muted so far' : 'Still muted'), h('span', { class: muted - restored ? 'vu-no-c' : '' },
+            checking ? (state.done || 0) - restored : muted - restored),
           state.unknown ? [h('span', null, '…not checked yet (network problem, retrying)'), h('span', null, state.unknown)] : null,
           h('span', null, 'Audio restored'), h('span', null, `${span(state.restoredSeconds)} / ${span(state.mutedSeconds)}`)),
         h('div', { class: 'vu-meter', title: `${pct}% of the muted time restored` },
@@ -618,7 +633,7 @@
         savedSection(),
         h('div', { class: 'vu-list-title' }, 'Muted parts of this VOD'),
         state.ranges.map((r) => h('div', { class: 'vu-row' },
-          h('span', { class: 'vu-dot', style: `background:${!r.restored ? '#e84848' : (r.sources || []).every((x) => x.kind === 'saved') ? '#a970ff' : '#22c55e'}` }),
+          h('span', { class: 'vu-dot', style: `background:${r.kind === 'pending' ? '#8a8a93' : r.kind === 'wait' ? '#facc15' : !r.restored ? '#e84848' : (r.sources || []).every((x) => x.kind === 'saved') ? '#a970ff' : '#22c55e'}` }),
           h('span', null, `${clock(r.start)} – ${clock(r.end)}`),
           h('span', { class: 'vu-len' }, r.restored ? span(r.end - r.start) : REASON_SHORT[mainReason(r)] || 'still muted',
             viaText(r)))),
@@ -675,7 +690,12 @@
           : sv.mode === 'watched'
             ? 'Only the parts you play are saved (change this in the extension menu).'
             : 'The rest will be saved while you watch.'),
-        sv.saved ? link('Delete saved audio for this VOD', 'deleteSaved') : null,
+        sv.saved ? h('div', { style: 'display:flex;gap:14px' },
+          link('Delete saved audio for this VOD', 'deleteSaved'),
+          h('button', { class: 'vu-link', onclick: (e) => {
+            e.stopPropagation();
+            window.open(`https://www.twitch.tv/robots.txt#vod-unmuter-backup&vod=${encodeURIComponent(state.vodKey)}`, '_blank', 'noopener');
+          } }, 'Export to a file')) : null,
       ];
     }
     return h('div', { class: 'vu-save' }, h('div', { class: 'vu-list-title' }, 'Saved on this computer'), body);
@@ -684,9 +704,17 @@
   function renderBars() {
     if (barsVersion !== version) {
       barsVersion = version;
-      bars.replaceChildren(...state.ranges.map((r) => {
+      // A part with an invalid position would only make the browser complain
+      // ("NaN%"): skip it, and say once in the console what was wrong.
+      const valid = (r) => Number.isFinite(r.start) && Number.isFinite(r.end) && state.total > 0;
+      const bad = state.ranges.filter((r) => !valid(r));
+      if (bad.length && !badRangesLogged) {
+        badRangesLogged = true;
+        console.warn('[VOD Unmuter] · page: skipped seek bar parts with an invalid position', JSON.stringify({ total: state.total, type: state.type, example: bad[0] }));
+      }
+      bars.replaceChildren(...state.ranges.filter(valid).map((r) => {
         const el = h('span', {
-          class: `vu-bar ${r.restored ? 'vu-ok' : ['network', 'checking'].includes(mainReason(r)) ? 'vu-wait' : 'vu-no'}`,
+          class: `vu-bar ${r.restored ? 'vu-ok' : r.kind === 'pending' ? 'vu-pending' : r.kind === 'wait' ? 'vu-wait' : 'vu-no'}`,
           style: `inset-inline-start:${(r.start / state.total) * 100}%;width:${((r.end - r.start) / state.total) * 100}%`,
         });
         el.vuFrom = (r.start / state.total) * 100;
@@ -745,7 +773,7 @@
   // ------------------------------------------------------------------ update
   function update() {
     const id = currentVodId();
-    if (id !== vodId) { vodId = id; state = null; version++; vodSince = Date.now(); }
+    if (id !== vodId) { vodId = id; state = null; version++; vodSince = Date.now(); owner = null; }
 
     const player = findPlayer();
     // Twitch shows muted parts (red marks on its seek bar, or its "audio for
@@ -770,7 +798,7 @@
     } else badge.remove();
 
     const bar = player && player.querySelector('.seekbar-bar');
-    const recolor = show && settings.recolor && state.type === 'result' && bar && state.total > 0;
+    const recolor = show && settings.recolor && (state.type === 'result' || state.type === 'checking') && state.ranges && bar && state.total > 0;
     document.documentElement.classList.toggle('vu-recolor', !!recolor);
     if (recolor) {
       if (bars.parentNode !== bar) bar.append(bars);
@@ -804,8 +832,8 @@
     const sources = hit.sources || [];
     // (replaceChildren doesn't unpack nested lists, so flatten them first)
     tip.replaceChildren(...[
-      h('div', { class: 'vu-tip-head ' + (hit.restored ? 'vu-ok-c' : 'vu-no-c') },
-        hit.restored ? '✓ Audio unmuted' : '✕ Still muted'),
+      h('div', { class: 'vu-tip-head ' + (hit.restored ? 'vu-ok-c' : hit.kind === 'pending' || hit.kind === 'wait' ? 'vu-part-c' : 'vu-no-c') },
+        hit.restored ? '✓ Audio unmuted' : hit.kind === 'pending' ? '… Not checked yet' : hit.kind === 'wait' ? '… Checked again soon' : '✕ Still muted'),
       h('div', { class: 'vu-tip-line' },
         `${clock(hit.start)} – ${clock(hit.end)} · ${span(hit.end - hit.start)} · ${plural(hit.segments)}`),
       hit.restored
@@ -854,6 +882,10 @@
     const m = ev.data;
     if (!m) return;
     if (m.type === 'hello' && m.where === 'player') { playerHellos++; return; }
+    if (m.instance && ['checking', 'result', 'none'].includes(m.type)) {
+      if (m.playing) owner = m.instance;
+      else if (owner && m.instance !== owner) return;
+    }
     if (m.type === 'settings') {
       settings = Object.assign({}, settings, m.settings);
       version++;

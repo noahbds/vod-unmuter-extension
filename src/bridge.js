@@ -54,13 +54,24 @@
     });
   }
 
+  // A copy of the saved-VOD list in the extension's storage, so the menu can
+  // show it even when no Twitch tab is open (the audio itself stays here).
+  function cacheList(reply) {
+    if (!reply || !Array.isArray(reply.vods) || location.hostname !== 'www.twitch.tv') return;
+    const vods = reply.vods.map((v) => ({ vod: v.vod, channel: v.channel, streamedAt: v.streamedAt, savedAt: v.savedAt,
+      segments: v.segments, bytes: v.bytes, muted: v.muted, restorable: v.restorable, pinned: !!v.pinned }));
+    api.storage.local.set({ savedCache: { at: Date.now(), vods, quota: reply.quota || null } }).catch(() => {});
+  }
+  if (location.hostname === 'www.twitch.tv') setTimeout(() => askPage({ action: 'list' }, 8000).then(cacheList), 4000);
+
   let autoBusy = false;
   api.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     if (!msg) return undefined;
 
     // Popup: list / delete saved audio.
     if (msg.vu === 'storage') {
-      askPage({ action: msg.action, vodKey: msg.vodKey }, msg.action === 'diag' ? 4000 : 8000).then(sendResponse);
+      askPage({ action: msg.action, vodKey: msg.vodKey, channel: msg.channel, pinned: msg.pinned }, msg.action === 'diag' ? 4000 : 8000)
+        .then((reply) => { cacheList(reply); sendResponse(reply); });
       return true; // answer asynchronously
     }
 

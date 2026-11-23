@@ -220,8 +220,12 @@ on this computer only.
 **Managing it:**
 - In the **player**: hover the counter → *Saved on this computer* → *Delete
   saved audio for this VOD*. *Save it again* undoes that during the session.
-- In the **popup**: the list of saved VODs (channel, stream date, size), with
-  ✕ to delete one, **Delete all**, and **Back up…** (see below). The popup needs an open Twitch tab,
+- In the **popup**: saved VODs grouped by channel (with a total and **Delete
+  channel**). Each one says how much is saved and why the rest isn't (e.g.
+  "94 / 108 parts saved · 14 deleted by Twitch before saving"), with buttons
+  to **📌 pin** it (never deleted automatically), **⤓ export** it, or **✕**
+  delete it. **Delete all** and **Back up…** are at the top. With no Twitch
+  tab open, the list still shows (read-only). The popup needs an open Twitch tab,
   because the audio lives in twitch.tv's storage.
 - Saves older than your **Delete saved audio after** setting are removed
   automatically.
@@ -259,6 +263,13 @@ they're still live; they're re-checked until they end.
   to only use tabs you already have open.
 - **Subscriber-only VODs:** saved if you're logged in to Twitch in this
   browser with a subscribed account, the same way the player gets access.
+- **Suggestions:** channels whose VODs you saved but don't auto-save show as
+  "+ channel" buttons. The counter's panel also offers to auto-save a channel
+  when its VOD's originals are already gone.
+- **Notifications** (off by default): one when auto-save saves a VOD, or
+  can't (error, storage limit).
+- **Toolbar icon:** shows "…" while auto-save runs, "!" when something needs
+  attention (details in the menu).
 - **Status:** the popup shows each channel's latest VOD, for example
   *Latest VOD: 181/181 saved (1 already deleted by Twitch) · 5 min ago*, and
   **Check now** runs a check immediately.

@@ -100,3 +100,11 @@ button.icon { padding: 2px 7px; }
 
 .note { margin: 10px 0 0; color: var(--muted); font-size: 12px; }
 h2 .buttons { display: flex; gap: 6px; }
+.channel-head { display: flex; align-items: baseline; gap: 4px; margin: 10px 0 2px; }
+.channel-head button { margin-left: auto; font-size: 11px; }
+.row-buttons { display: flex; gap: 2px; flex: none; }
+.vod.pinned { border-left: 2px solid var(--saved); padding-left: 6px; }
+.small { font-size: 12px; }
+.suggest { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; margin: 6px 0 2px; }
+.suggest small { color: var(--muted); }
+.chip { border-radius: 999px; padding: 2px 9px; font-size: 12px; }

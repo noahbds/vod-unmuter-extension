@@ -18,7 +18,7 @@ const WINDOW_HOURS = 36;      // after this, Twitch has deleted the originals
 const RETRY_MINUTES = 15;     // don't redo a VOD more often than this
 const BUSY_MINUTES = 45;      // safety: forget a run that never reported back
 const MUTE_LATE_HOURS = 12;   // keep checking unmuted VODs this long after the stream
-const DEFAULTS = { saveAudio: true, autoChannels: [], autoOpenTab: true };
+const DEFAULTS = { saveAudio: true, autoChannels: [], autoOpenTab: true, notify: false };
 const EMPTY_STATE = { vods: {}, channels: {}, lastRun: null, note: '' };
 
 // ------------------------------------------------------------------ schedule
@@ -179,9 +179,56 @@ async function check(force) {
 }
 
 // ------------------------------------------------------------------ results
+// ------------------------------------------------------------------ badge
+// The toolbar icon shows "…" while auto-save runs and "!" when something
+// needs attention (an error on a channel or VOD).
+async function refreshBadge() {
+  if (!api.action) return;
+  const { autoState } = await api.storage.local.get({ autoState: EMPTY_STATE });
+  const { autoBusyUntil } = await session.get({ autoBusyUntil: 0 });
+  const vods = Object.values(autoState.vods || {});
+  const problem = Object.values(autoState.channels || {}).some((c) => c.error) ||
+    vods.some((v) => v.error && v.lastRun && Date.now() - v.lastRun < 36 * 36e5) || !!autoState.note;
+  const running = autoBusyUntil > Date.now() || vods.some((v) => v.running);
+  const text = problem ? '!' : running ? '…' : '';
+  try {
+    await api.action.setBadgeText({ text });
+    await api.action.setBadgeBackgroundColor({ color: problem ? '#dc2626' : '#9146ff' });
+    await api.action.setTitle({ title: problem ? 'VOD Unmuter: auto-save needs attention (open the menu)' : running ? 'VOD Unmuter: auto-saving…' : 'VOD Unmuter' });
+  } catch (e) { /* ignore */ }
+}
+api.storage.onChanged.addListener((changes) => { if (changes.autoState) refreshBadge(); });
+api.runtime.onStartup.addListener(refreshBadge);
+
+// ------------------------------------------------------------------ notifications
+// Optional (off by default): one notification per auto-saved VOD.
+async function notify(rec, result, before) {
+  const { notify: on } = await api.storage.sync.get({ notify: false });
+  if (!on || !api.notifications) return;
+  const who = rec.channel || 'a channel';
+  let title, message;
+  if (!result.ok) {
+    title = `Auto-save failed for ${who}`;
+    message = result.error || 'Unknown error. Open the extension menu for details.';
+  } else if (result.limitReached) {
+    title = `Storage limit reached (${who})`;
+    message = `${result.saved} of ${result.restorable} muted parts saved. Raise the limit in the extension menu.`;
+  } else if ((result.saved || 0) > (before || 0)) {
+    title = `Saved ${who}'s VOD`;
+    message = `${result.saved} muted part${result.saved > 1 ? 's' : ''} saved` +
+      (result.muted > result.restorable ? ` (${result.muted - result.restorable} already deleted by Twitch)` : '') + '.';
+  } else return;
+  try {
+    await api.notifications.create('vu-' + result.vodId, { type: 'basic', iconUrl: api.runtime.getURL('icons/icon-128.png'), title, message });
+  } catch (e) { /* notifications blocked */ }
+}
+
 function recordResult(result) {
   return updateState((state) => {
     const rec = state.vods[result.vodId] || (state.vods[result.vodId] = { channel: '' });
+    const before = rec.saved || 0;
+    const wasError = rec.error;
+    Promise.resolve().then(() => { if (result.ok ? (result.saved || 0) > before || result.limitReached : result.error !== wasError) notify(rec, result, before); });
     Object.assign(rec, {
       running: false,
       lastRun: Date.now(),

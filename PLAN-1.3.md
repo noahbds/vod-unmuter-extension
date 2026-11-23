@@ -146,6 +146,10 @@ Effort: S.
 
 ## Phase 3: features
 
+**Status: done**, except *auto-save your follows*: Twitch's API refuses to
+list follows without its own signed requests, even logged in. Suggestions
+from saved VODs replace it. See CHANGELOG.md.
+
 ### Save more VODs in time
 
 | Feature | What it does | Effort |

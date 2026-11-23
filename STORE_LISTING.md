@@ -88,6 +88,12 @@ Restore the audio of muted segments in Twitch VODs. The extension plays Twitch's
 Stores the user's settings (on/off switches, saved audio quality, storage limit, how long saved audio is kept), the list of channels the user added to auto-save, and the auto-save status shown in the extension's menu. Nothing is sent anywhere.
 ```
 
+### Justification de l'autorisation notifications
+
+```
+Optional, off by default: when the user turns on "Notifications" in the extension's menu, it shows a notification when auto-save has saved the muted parts of a VOD from a channel the user chose, or could not save them (storage limit, subscriber-only VOD). Nothing else is ever notified.
+```
+
 ### Justification de l'autorisation alarms
 
 ```

@@ -1,5 +1,5 @@
 const api = globalThis.browser || globalThis.chrome;
-const DEFAULTS = { enabled: true, badge: true, recolor: true, saveAudio: true, saveMode: 'whole', keepDays: 60, saveQuality: 'high', maxStorageMB: 1000, autoOpenTab: true, debug: false };
+const DEFAULTS = { enabled: true, badge: true, recolor: true, saveAudio: true, saveMode: 'whole', keepDays: 60, saveQuality: 'high', maxStorageMB: 1000, autoOpenTab: true, debug: false, notify: false };
 const NUMBERS = ['keepDays', 'maxStorageMB'];
 const TWITCH_TABS = ['https://www.twitch.tv/*', 'https://m.twitch.tv/*'];
 const $ = (id) => document.getElementById(id);
@@ -15,6 +15,8 @@ const MODE_HELP = {
 };
 
 // ------------------------------------------------------------------ settings
+let settingsReady;
+const settingsLoaded = new Promise((resolve) => { settingsReady = resolve; });
 async function loadSettings() {
   const settings = await api.storage.sync.get(DEFAULTS);
   for (const key of Object.keys(DEFAULTS)) {
@@ -31,6 +33,7 @@ async function loadSettings() {
     });
   }
   refreshDependents();
+  settingsReady();
 }
 
 // Firefox has no AAC encoder: High and Small can't be made there.
@@ -40,8 +43,18 @@ let aac = true;
     aac = typeof AudioEncoder === 'function' && !!(await AudioEncoder.isConfigSupported({
       codec: 'mp4a.40.2', sampleRate: 48000, numberOfChannels: 2, bitrate: 96000, aac: { format: 'adts' } })).supported;
   } catch (e) { aac = false; }
+  await settingsLoaded;
   if (!aac) {
-    for (const o of $('saveQuality').options) if (o.value !== 'original') o.textContent += ' (not in this browser)';
+    // High and Small can't be made here: use Original, and say why.
+    for (const o of $('saveQuality').options) {
+      if (o.value === 'original') continue;
+      o.textContent += ' (not in this browser)';
+      o.disabled = true;
+    }
+    if ($('saveQuality').value !== 'original') {
+      $('saveQuality').value = 'original';
+      await api.storage.sync.set({ saveQuality: 'original' });
+    }
   }
   refreshDependents();
 })();
@@ -53,20 +66,21 @@ function refreshDependents() {
     row.querySelectorAll('select, input, button').forEach((s) => { s.disabled = !on; });
   });
   $('saveModeHelp').textContent = MODE_HELP[$('saveMode').value];
-  $('saveQualityHelp').textContent = !aac && $('saveQuality').value !== 'original'
-    ? 'This browser can\'t compress audio, so saves stay lossless: 1.1 to 2.4 MB per muted minute'
+  $('saveQualityHelp').textContent = !aac
+    ? 'This browser can\'t compress audio (no AAC encoder), so saves are lossless: 1.1 to 2.4 MB per muted minute'
     : QUALITY_HELP[$('saveQuality').value];
 }
 
 // ---------------------------------------------------------------- saved audio
 // Saved audio lives in twitch.tv's own storage, so ask an open Twitch tab.
-async function ask(action, vodKey) {
-  const tabs = await api.tabs.query({ url: TWITCH_TABS });
+// Saved audio is kept per site: it lives on www.twitch.tv.
+async function ask(action, vodKey, extra) {
+  const tabs = await api.tabs.query({ url: ['https://www.twitch.tv/*'] });
   if (!tabs.length) return { noTab: true };
-  tabs.sort((a, b) => (b.active - a.active) || (a.url.includes('www.') ? -1 : 1));
+  tabs.sort((a, b) => b.active - a.active);
   for (const tab of tabs) {
     try {
-      const reply = await api.tabs.sendMessage(tab.id, { vu: 'storage', action, vodKey }, { frameId: 0 });
+      const reply = await api.tabs.sendMessage(tab.id, Object.assign({ vu: 'storage', action, vodKey }, extra || {}), { frameId: 0 });
       if (reply && !reply.error) return reply;
     } catch (e) { /* tab not ready: try the next one */ }
   }
@@ -85,18 +99,37 @@ function el(tag, attrs, ...children) {
   return node;
 }
 
+const BACKUP_URL = 'https://www.twitch.tv/robots.txt#vod-unmuter-backup';
+
+// "182 / 204 parts saved · 22 deleted by Twitch before saving"
+function savedLine(v) {
+  const parts = [`${v.segments} part${v.segments === 1 ? '' : 's'} · ${mb(v.bytes)} · saved ${day(v.savedAt)}`];
+  if (v.muted) {
+    const before = v.muted - (v.restorable || 0);
+    const notYet = (v.restorable || 0) - v.segments;
+    parts[0] = `${v.segments} / ${v.muted} parts saved · ${mb(v.bytes)}`;
+    if (before > 0) parts.push(`${before} deleted by Twitch before saving`);
+    if (notYet > 0) parts.push(`${notYet} not saved yet (storage limit, or saving still running)`);
+  }
+  return parts.join(' · ');
+}
+
 function render(reply) {
   const box = $('saved');
   box.replaceChildren();
   $('deleteAll').hidden = true;
+  const readOnly = !!reply.cached;
 
-  if (reply.noTab) {
-    box.append(el('p', { class: 'muted' }, 'Open any Twitch page to see and manage saved audio.'));
+  if (reply.noTab && !reply.cached) {
+    box.append(el('p', { class: 'muted' }, 'Open www.twitch.tv in a tab to see and manage saved audio.'));
     return;
   }
   if (reply.error) {
     box.append(el('p', { class: 'muted' }, 'Could not reach the Twitch tab. Reload it and try again.'));
     return;
+  }
+  if (readOnly) {
+    box.append(el('p', { class: 'muted small' }, `As of ${new Date(reply.at).toLocaleString()}. Open a www.twitch.tv tab to delete, pin or export.`));
   }
   const vods = (reply.vods || []).sort((a, b) => b.savedAt - a.savedAt);
   if (!vods.length) {
@@ -105,17 +138,48 @@ function render(reply) {
       : 'Nothing saved.'));
     return;
   }
+
+  // Grouped by channel, biggest first.
+  const groups = new Map();
   for (const v of vods) {
-    box.append(el('div', { class: 'vod' },
-      el('div', null,
-        el('b', null, v.channel || 'Unknown channel'),
-        el('small', null, ` · streamed ${v.streamedAt ? day(v.streamedAt) : '?'}`),
-        el('br'),
-        el('small', null, `${v.segments} segments · ${mb(v.bytes)} · saved ${day(v.savedAt)}`)),
-      el('button', {
-        type: 'button', class: 'icon', title: 'Delete this saved audio', 'aria-label': `Delete saved audio for ${v.channel}`,
-        onclick: async () => render(await ask('delete', v.vod)),
-      }, '✕')));
+    const k = v.channel || 'Unknown channel';
+    if (!groups.has(k)) groups.set(k, []);
+    groups.get(k).push(v);
+  }
+  const ordered = [...groups].sort((a, b) => b[1].reduce((n, v) => n + v.bytes, 0) - a[1].reduce((n, v) => n + v.bytes, 0));
+  for (const [channel, list] of ordered) {
+    const bytes = list.reduce((n, v) => n + v.bytes, 0);
+    box.append(el('div', { class: 'channel-head' },
+      el('b', null, channel), el('small', null, ` · ${list.length} VOD${list.length > 1 ? 's' : ''} · ${mb(bytes)}`),
+      readOnly || channel === 'Unknown channel' ? null : el('button', {
+        type: 'button', class: 'icon danger', title: `Delete all saved audio of ${channel} (pinned VODs are kept)`,
+        'aria-label': `Delete all saved audio of ${channel}`,
+        onclick: async () => {
+          if (!confirm(`Delete all saved audio of ${channel}? Pinned VODs are kept.`)) return;
+          render(await ask('deleteChannel', null, { channel }));
+        },
+      }, 'Delete channel')));
+    for (const v of list) {
+      box.append(el('div', { class: 'vod' + (v.pinned ? ' pinned' : '') },
+        el('div', null,
+          el('small', null, `streamed ${v.streamedAt ? day(v.streamedAt) : '?'}`, v.pinned ? ' · 📌 pinned' : ''),
+          el('br'),
+          el('small', null, savedLine(v))),
+        readOnly ? null : el('span', { class: 'row-buttons' },
+          el('button', {
+            type: 'button', class: 'icon', title: v.pinned ? 'Unpin: allow automatic deletion again' : 'Pin: never delete it automatically',
+            'aria-label': v.pinned ? `Unpin ${channel}'s VOD` : `Pin ${channel}'s VOD`, 'aria-pressed': String(!!v.pinned),
+            onclick: async () => render(await ask('pin', v.vod, { pinned: !v.pinned })),
+          }, v.pinned ? '📌' : '📍'),
+          el('button', {
+            type: 'button', class: 'icon', title: 'Export this VOD to a file', 'aria-label': `Export ${channel}'s VOD`,
+            onclick: () => { api.tabs.create({ url: `${BACKUP_URL}&vod=${encodeURIComponent(v.vod)}` }); window.close(); },
+          }, '⤓'),
+          el('button', {
+            type: 'button', class: 'icon', title: 'Delete this saved audio', 'aria-label': `Delete saved audio for ${channel}`,
+            onclick: async () => render(await ask('delete', v.vod)),
+          }, '✕'))));
+    }
   }
   const total = vods.reduce((n, v) => n + v.bytes, 0);
   const limit = Number($('maxStorageMB').value) * 1e6;
@@ -127,11 +191,16 @@ function render(reply) {
     box.append(el('div', { class: 'meter', role: 'img', 'aria-label': `${pct}% of the storage limit used` },
       el('div', { style: `width:${pct}%` })));
   }
-  $('deleteAll').hidden = false;
+  $('deleteAll').hidden = readOnly;
 }
 
 async function loadSaved() {
-  render(await ask('list'));
+  const reply = await ask('list');
+  if (reply.noTab) {
+    const { savedCache } = await api.storage.local.get({ savedCache: null });
+    if (savedCache) return render(Object.assign({ cached: true }, savedCache));
+  }
+  render(reply);
 }
 
 $('deleteAll').addEventListener('click', async () => {
@@ -187,6 +256,27 @@ async function renderChannels() {
           await api.storage.sync.set({ autoChannels: list.filter((c) => c !== login) });
         },
       }, '✕')));
+  }
+  // Channels whose VODs you saved, but that aren't auto-saved: one click to add.
+  const { savedCache } = await api.storage.local.get({ savedCache: null });
+  const counts = new Map();
+  for (const v of (savedCache && savedCache.vods) || []) if (v.channel) counts.set(v.channel, (counts.get(v.channel) || 0) + 1);
+  const suggestions = [...counts].filter(([c]) => !autoChannels.includes(c)).sort((a, b) => b[1] - a[1]).slice(0, 4);
+  const sug = $('suggest');
+  sug.replaceChildren();
+  sug.hidden = !suggestions.length;
+  if (suggestions.length) {
+    sug.append(el('small', null, 'You watched VODs of: '));
+    for (const [c] of suggestions) {
+      sug.append(el('button', {
+        type: 'button', class: 'chip', title: `Auto-save ${c}'s next VODs`,
+        onclick: async () => {
+          const { autoChannels: list } = await api.storage.sync.get({ autoChannels: [] });
+          if (!list.includes(c)) await api.storage.sync.set({ autoChannels: list.concat(c) });
+          api.runtime.sendMessage({ vu: 'autoCheckNow' }).catch(() => {});
+        },
+      }, `+ ${c}`));
+    }
   }
   $('autoNote').hidden = !autoState.note;
   $('autoNote').textContent = autoState.note || '';

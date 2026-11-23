@@ -2,6 +2,45 @@
 
 ## 1.3.0 (in progress: not released yet)
 
+Phase 3, features:
+
+- **Live checking.** The seek bar fills in while VOD parts are checked (grey =
+  not checked yet), and the counter opens its panel during the check, with
+  what is known so far.
+- **Saved audio list, in the menu:**
+  - grouped by channel, with a total and **Delete channel**;
+  - each VOD says how much is saved and why the rest isn't, e.g.
+    "94 / 108 parts saved · 14 deleted by Twitch before saving";
+  - **📌 Pin** a VOD so neither "Delete saved audio after" nor the storage
+    limit ever removes it;
+  - **⤓ Export** one VOD (also from the player's panel: "Export to a file");
+  - the list shows even with no Twitch tab open (read-only, with its date).
+- **Auto-save:**
+  - suggests channels whose VODs you saved ("+ zackrawrr");
+  - optional **Notifications** when it saves a VOD or can't;
+  - the toolbar icon shows "…" while it runs and "!" when something needs
+    attention.
+- **Firefox:** the saved quality switches to Original by itself. High and
+  Small can't be made there (no AAC encoder), so they're disabled in the menu.
+- Not done: **auto-save your follows**. Twitch refuses to list follows to
+  extensions, even logged in ("service error" without its internal signed
+  requests), and reading them from the page would break with every redesign.
+  The suggestions above are the substitute.
+
+Fix: **counter counting parts that aren't muted any more** (e.g. 496 instead
+of 420 on a VOD watched since it was live). Twitch reprocesses the muting
+during and after a stream; parts it unmutes are now dropped from the count
+(and the seek bar) as soon as the playlist changes, instead of staying
+forever. Tested: 30 parts unmuted by Twitch → 94 / 108 became 64 / 78
+(the previous build stayed at 94 / 108). Seek bar parts with an invalid
+position are skipped instead of producing "NaN%" warnings, and the cause is
+logged once.
+
+Fix: **counter switching to another result (e.g. 416/420 ↔ 496/496)** when
+another extension (like TwitchNoSub) runs a second player. Each copy of the
+extension now says whether it is really downloading the video, and the counter
+follows only that one.
+
 Phase 2, explanations and reliability:
 
 - **Why each part is still muted.** Hover a red part of the seek bar:
