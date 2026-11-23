@@ -1,6 +1,7 @@
 // Hook module, page only (cut out of the player worker's copy): see src/hook.js.
 
 import { IS_PAGE, post } from '../shared/state.js';
+import { log } from '../shared/logger.js';
 import { audioRange, idb, recBytes, vodInfo } from './idb.js';
 import { clearGone } from './gone-cache.js';
 import { deleteSavedVod, expireSaved, listSaved, updateVodInfo } from './saved-audio.js';
@@ -44,6 +45,7 @@ export async function exportSaved(vodKeys) {
   const len = new Uint8Array(4);
   new DataView(len.buffer).setUint32(0, head.byteLength, true);
   const blob = new Blob([BACKUP_MAGIC, len, head].concat(blobs), { type: 'application/octet-stream' });
+  log('info', `backup file made: ${vods.length} VOD(s), ${header.audio.length} parts, ${(offset / 1e6).toFixed(1)} MB of sound` + (vodKeys ? ` (chosen: ${vodKeys.length})` : ' (everything saved)'));
   return { blob, vods: vods.length, segments: header.audio.length, bytes: offset };
 }
 
@@ -121,6 +123,8 @@ export async function importSaved(file, onProgress) {
     if (onProgress) onProgress(Math.min(i + BATCH, head.audio.length), head.audio.length);
   }
   for (const vod of result.vods) post({ type: 'savedChanged', vodKey: vod });
+  log('info', `backup file read${Number.isFinite(head.exported) ? ` (made ${new Date(head.exported).toISOString().slice(0, 16).replace('T', ' ')} UTC)` : ''}: ${result.added} part(s) added, ` +
+    `${(result.bytes / 1e6).toFixed(1)} MB, ${result.vods.size} VOD(s) · ${result.skipped} skipped (already saved here, or damaged entries)`);
   return { vods: result.vods.size, added: result.added, skipped: result.skipped, bytes: result.bytes };
 }
 

@@ -4,6 +4,25 @@
 
 No change in what the extension does: this version reorganizes its code.
 
+**Clearer logs.** Every line names the VOD by channel, stream day and
+quality ("squeezie 2026-11-22 · Source") and a muted part by its place in
+the video ("part 242 (40:20–40:30)"), behind a purple `[VOD Unmuter]` badge.
+- The end of a check is one line: what can be unmuted and from where, the
+  muted time, the stretches that stay muted, how long it took. With *Debug
+  logging* it opens (a collapsed group) on every part, in VOD order:
+  neighbours with the same result share a line, and each file asked shows
+  Twitch's answer (`200`, `404`, `503`, "remembered"). It also says when the
+  time went to waiting for a free request slot rather than to Twitch.
+- New lines: when checking starts; each muted part the player plays, and how
+  (Debug logging); what was saved, from which quality, how many MB, and why
+  any part wasn't; what compression freed; settings changes; deletions;
+  backup files made and read.
+- The auto-save timer logs each run in its own console: each channel's
+  recent VODs and why each one is or isn't saved now, which tab is used, and
+  the result per VOD.
+- Errors are also passed to the console as they are, so their stack can be
+  expanded. Warnings say which VOD and part they are about.
+
 `src/hook.js` (2,100 lines) is split into 20 modules by what they do
 (`src/shared`, `src/media`, `src/storage`, `src/recovery`, `src/player`,
 `src/messaging`). `node build.mjs` puts them back into one plain

@@ -66,14 +66,18 @@ export async function putRecord(vod, num, rec, replace, onQuotaExceeded) {
       // The browser's storage for twitch.tv is full (disk nearly full, or
       // the browser's own limit): stop saving instead of failing on every
       // segment, and say so in the panel.
-      if (!storageFull) log('warn', 'browser storage for twitch.tv is full: saving stopped', e);
-      storageFull = true;
+      noteStorageFull(e);
       if (onQuotaExceeded) onQuotaExceeded(vod);
-    } else log('warn', 'could not save audio', e);
+    } else log('warn', `could not save the sound of part ${num} of VOD ${vod}`, e);
     return null;
   }
 }
 export let storageFull = false;
+// The browser's storage for twitch.tv is full: said once, not on every write.
+export function noteStorageFull(e) {
+  if (!storageFull) log('warn', 'browser storage for twitch.tv is full: saving stopped', e);
+  storageFull = true;
+}
 
 // Removes one part's saved copy and keeps the VOD's totals right.
 export async function deleteSavedSegment(vod, num) {
@@ -93,7 +97,7 @@ export async function deleteSavedSegment(vod, num) {
         };
       };
     });
-  } catch (e) { log('warn', 'could not remove a watched part\'s saved copy', e); }
+  } catch (e) { log('warn', `could not remove the saved copy of part ${num} of VOD ${vod} (watched or behind you)`, e); }
 }
 
 export async function deleteSavedVod(vod) {
@@ -115,7 +119,11 @@ export async function updateVodInfo(vod, fields) {
         out.value = true;
       };
     });
-  } catch (e) { log('warn', 'could not update saved VOD info', e); return false; }
+  } catch (e) {
+    if (e && e.name === 'QuotaExceededError') noteStorageFull(e); // e.g. the position, every second: said once
+    else log('warn', `could not update ${Object.keys(fields).join(', ')} of saved VOD ${vod}`, e);
+    return false;
+  }
 }
 
 // Saved VODs (records left with no part, which only remember a position,
@@ -148,7 +156,7 @@ export async function makeRoom(job, incoming) {
     if (total <= limit) break;
     await deleteSavedVod(v.vod);
     total -= v.bytes;
-    log('info', `storage limit: deleted the oldest saved VOD (${v.channel || v.vod})`);
+    log('info', `storage limit (${maxMB} MB) reached: deleted the oldest saved VOD to make room: ${v.channel || v.vod}${v.streamedAt ? ' ' + new Date(v.streamedAt).toISOString().slice(0, 10) : ''}, ${v.segments} parts, ${(v.bytes / 1e6).toFixed(1)} MB`);
   }
   return total <= limit;
 }

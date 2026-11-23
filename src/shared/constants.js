@@ -5,8 +5,45 @@ export const CHANNEL = 'vod-unmuter';
 
 export const PLAYING_MS = 10 * 60 * 1000; // "playing" = downloaded a segment of it in the last 10 min
 
-// Short name of a job for log lines: "<channel> · <quality>".
-export const jobName = (job) => `${job.vodKey.split('_').slice(1, -2).join('_') || job.vodKey.slice(0, 8)} · ${job.dir}`;
+// For log lines. A job: "<channel> <stream day> · <quality>", e.g.
+// "squeezie 2026-11-22 · Source". A muted part: its number and where it is in
+// the VOD, e.g. "part 242 (40:20–40:30)".
+export const jobName = (job) => {
+  const t = Number(job.vodKey.split('_').pop());
+  const day = t > 1e9 ? ' ' + new Date(t * 1000).toISOString().slice(0, 10) : '';
+  return `${job.vodKey.split('_').slice(1, -2).join('_') || job.vodKey.slice(0, 8)}${day} · ${prettyQuality(job.dir)}`;
+};
+export const fmtTime = (sec) => {
+  const s = Math.max(0, Math.round(sec || 0));
+  const two = (n) => String(n).padStart(2, '0');
+  return s >= 3600 ? `${Math.floor(s / 3600)}:${two(Math.floor((s % 3600) / 60))}:${two(s % 60)}` : `${Math.floor(s / 60)}:${two(s % 60)}`;
+};
+export const partName = (seg) => `part ${seg.num} (${fmtTime(seg.start)}–${fmtTime(seg.start + seg.duration)})`;
+// Where some parts are, as stretches of the VOD: "2:06:31–2:09:11 (6 parts),
+// 5:00:00–5:00:10 (1 part)", at most `max` of them.
+export const stretches = (segs, max = 6) => {
+  const runs = [];
+  for (const s of segs.slice().sort((a, b) => a.start - b.start)) {
+    const last = runs[runs.length - 1];
+    if (last && Math.abs(last.end - s.start) < 0.5) { last.end = s.start + s.duration; last.n++; } else runs.push({ start: s.start, end: s.start + s.duration, n: 1 });
+  }
+  const text = runs.slice(0, max).map((r) => `${fmtTime(r.start)}–${fmtTime(r.end)} (${r.n} part${r.n > 1 ? 's' : ''})`).join(', ');
+  return runs.length > max ? `${text} and ${runs.length - max} more stretches` : text;
+};
+// The same for a part known only by its number.
+export const partOf = (job, num) => {
+  const seg = job.segs.find((s) => s.num === num);
+  return seg ? partName(seg) : `part ${num}`;
+};
+// A file a muted part's sound can come from, e.g. 'Source original file',
+// '720p60 "-unmuted" backup' (source: see probe-resolver.js).
+export const fileLabel = (job, source) => {
+  if (source === 'saved') return 'copy saved on this computer';
+  const slash = source.indexOf('/');
+  const dir = slash < 0 ? job.dir : source.slice(0, slash);
+  const file = slash < 0 ? source : source.slice(slash + 1);
+  return `${prettyQuality(dir)} ${file === '-unmuted.ts' ? '"-unmuted" backup' : 'original file'}`;
+};
 export const SUFFIXES = ['.ts', '-unmuted.ts']; // where the original audio can live
 export const MUTED_RE = /^(.*?)(\d+)-muted\.ts(\?.*)?$/;
 export const MAX_PARALLEL = 48;   // background checks (tiny requests, HTTP/2; measured: 14 s -> 10 s)

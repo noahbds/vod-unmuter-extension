@@ -462,6 +462,21 @@ save to the console (F12).
 Open the console (F12) and look for messages starting with `[VOD Unmuter]`. If
 the player stops loading, turn off *Restore muted audio* and reload.
 
+**Reading the console**
+Type `VOD Unmuter` in the console's filter box to see only the extension's
+lines. Each says where it comes from: `page`, `player` (Twitch's video player
+worker), `auto-save` or `bridge`. It also names the VOD ("squeezie 2026-11-22
+· Source") and, for a muted part, its place in the video ("part 242
+(40:20–40:30)"). The summary of a check is a collapsed group: with *Debug
+logging* on, click it to see every part, with each file asked and Twitch's
+answer (`404`, `403`: deleted; `503` or "network error": not sure, asked again
+later). In Chrome, debug lines need **Verbose** ticked in the console's levels
+menu. The text after each line (for example `64ca7465-…:147:71`) is the
+browser's link to the code that wrote it. In the player it's a random name,
+because Twitch makes its worker from a Blob. The auto-save timer logs in its
+own console: Chrome: `chrome://extensions`, then *service worker* under the
+extension. Firefox: `about:debugging`, *This Firefox*, then *Inspect*.
+
 ---
 
 ## Testing

@@ -21,6 +21,20 @@ const MUTE_LATE_HOURS = 12;   // keep checking unmuted VODs this long after the 
 const DEFAULTS = { saveAudio: true, autoChannels: [], autoOpenTab: true, notify: false };
 const EMPTY_STATE = { vods: {}, channels: {}, lastRun: null, note: '' };
 
+// ------------------------------------------------------------------ logging
+// Same look as the page's lines: "[VOD Unmuter] background …", in the
+// background's own console (Chrome: chrome://extensions, "service worker";
+// Firefox: about:debugging, This Firefox, Inspect).
+function log(level, ...args) {
+  const words = args.filter((a) => typeof a !== 'object' || a === null).join(' ');
+  const objects = args.filter((a) => a && typeof a === 'object');
+  try {
+    (console[level === 'info' ? 'log' : level] || console.log)('%c[VOD Unmuter]%c %s%c %s',
+      'color:#fff;background:#9146ff;border-radius:3px;padding:0 4px;font-weight:600', 'color:#9146ff;font-weight:600', 'background', '', words, ...objects);
+  } catch (e) { /* no console */ }
+}
+const hoursAgo = (t) => `${((Date.now() - t) / 36e5).toFixed(1)} h ago`;
+
 // ------------------------------------------------------------------ schedule
 function schedule() {
   api.alarms.create(ALARM, { periodInMinutes: EVERY_MINUTES, delayInMinutes: 1 });
@@ -79,20 +93,25 @@ async function findWork(channels, state, force) {
       ch.name = user.displayName || login;
       ch.lastCheck = now;
       ch.error = null;
+      const notes = [];
       for (const { node: v } of user.videos.edges) {
         const live = v.status === 'RECORDING';
         const endedAt = new Date(v.createdAt).getTime() + v.lengthSeconds * 1000;
+        const what = `VOD ${v.id} (${live ? 'still live' : 'ended ' + hoursAgo(endedAt)})`;
         if (!live && now - endedAt > WINDOW_HOURS * 36e5) continue;
         const rec = state.vods[v.id] || (state.vods[v.id] = { channel: login, createdAt: v.createdAt });
         Object.assign(rec, { title: v.title, live, endedAt: live ? null : endedAt });
-        if (rec.done) continue;
-        if (!force && rec.lastRun && now - rec.lastRun < RETRY_MINUTES * 6e4) continue;
-        if (!force && rec.retryAfter && now < rec.retryAfter) continue;
+        if (rec.done) { notes.push(`${what}: done (${rec.saved || 0}/${rec.restorable || 0} saved)`); continue; }
+        if (!force && rec.lastRun && now - rec.lastRun < RETRY_MINUTES * 6e4) { notes.push(`${what}: tried ${hoursAgo(rec.lastRun)}, again after ${RETRY_MINUTES} min`); continue; }
+        if (!force && rec.retryAfter && now < rec.retryAfter) { notes.push(`${what}: ${rec.error || 'failed'}, retried at ${new Date(rec.retryAfter).toLocaleTimeString()}`); continue; }
+        notes.push(`${what}: to save`);
         work.push(v.id);
       }
+      log('info', `${ch.name}: ${notes.length ? notes.join(' · ') : `no VOD ended in the last ${WINDOW_HOURS} h (Twitch deletes the originals within about a day)`}`);
     } catch (e) {
       ch.lastCheck = now;
       ch.error = e.message || String(e);
+      log('warn', `${login}: could not list the channel's VODs on Twitch: ${ch.error} (the menu shows it; tried again next run)`);
     }
   }
   // Forget VODs older than Twitch's 60-day limit.
@@ -147,10 +166,17 @@ async function send(tabId, message) {
 // ------------------------------------------------------------------ check
 async function check(force) {
   const settings = await api.storage.sync.get(DEFAULTS);
-  if (!settings.saveAudio || !settings.autoChannels.length) return { ok: true, work: 0 };
+  if (!settings.saveAudio || !settings.autoChannels.length) {
+    if (force) log('info', `auto-save: nothing to do: ${!settings.saveAudio ? 'saving is off in the menu' : 'no channel in the auto-save list'}`);
+    return { ok: true, work: 0 };
+  }
 
   const { autoBusyUntil } = await session.get({ autoBusyUntil: 0 });
-  if (autoBusyUntil > Date.now()) return { ok: false, busy: true };
+  if (autoBusyUntil > Date.now()) {
+    log('info', `auto-save: skipped, the previous run is still going (given up at ${new Date(autoBusyUntil).toLocaleTimeString()} if it never reports back)`);
+    return { ok: false, busy: true };
+  }
+  log('info', `auto-save run (${force ? 'asked now' : `every ${EVERY_MINUTES} min`}): looking at ${settings.autoChannels.length} channel(s): ${settings.autoChannels.join(', ')}`);
 
   let work = [];
   await updateState(async (state) => {
@@ -158,17 +184,21 @@ async function check(force) {
     state.lastRun = Date.now();
     state.note = '';
   });
-  if (!work.length) return { ok: true, work: 0 };
+  if (!work.length) { log('info', 'auto-save: nothing to save now'); return { ok: true, work: 0 }; }
 
   const picked = await pickTab(settings.autoOpenTab);
   if (!picked) {
+    log('info', `auto-save: ${work.length} VOD(s) to save, waiting: no www.twitch.tv tab is open and "Open a Twitch tab if needed" is off in the menu`);
     await updateState((state) => { state.note = 'Waiting for a Twitch tab to be open'; });
     return { ok: false, noTab: true };
   }
+  log('info', `auto-save: saving ${work.length} VOD(s) (${work.join(', ')}) in ` +
+    (picked.opened ? `a background tab opened for it (tab ${picked.tab.id}, twitch.tv/robots.txt, closed when done)` : `an open Twitch tab (tab ${picked.tab.id}, ${picked.tab.active ? 'the one you are looking at' : 'not the one you are looking at'})`));
   await updateState((state) => { for (const id of work) if (state.vods[id]) state.vods[id].running = true; });
   await session.set({ autoBusyUntil: Date.now() + BUSY_MINUTES * 6e4 });
   const reply = await send(picked.tab.id, { vu: 'autosave', vodIds: work });
   if (!reply || !reply.accepted) {
+    log('warn', `auto-save: tab ${picked.tab.id} ${reply && reply.busy ? 'is still busy with an earlier run' : 'did not answer for 10 s (its page may not have loaded)'}: tried again next run`);
     await session.set({ autoBusyUntil: 0 });
     await updateState((s) => {
       for (const id of work) if (s.vods[id]) s.vods[id].running = false;
@@ -210,6 +240,8 @@ api.storage.onChanged.addListener((changes, area) => {
   if (area === 'sync' && changes.autoChannels) {
     const list = changes.autoChannels.newValue || [];
     updateState((state) => {
+      const gone = Object.keys(state.channels).filter((c) => !list.includes(c));
+      if (gone.length) log('info', `removed from auto-save: ${gone.join(', ')} (their VODs and errors are forgotten; saved audio stays)`);
       for (const c of Object.keys(state.channels)) if (!list.includes(c)) delete state.channels[c];
       for (const [id, v] of Object.entries(state.vods)) if (v.channel && !list.includes(v.channel)) delete state.vods[id];
       if (!list.length) state.note = '';
@@ -242,6 +274,11 @@ async function notify(rec, result, before) {
 }
 
 function recordResult(result) {
+  if (result.ok) {
+    log('info', `VOD ${result.vodId}: ${result.muted ? `${result.saved || 0} of ${result.restorable || 0} restorable muted parts saved` +
+      ` (${((result.bytes || 0) / 1e6).toFixed(1)} MB)` + (result.muted > result.restorable ? ` · ${result.muted - result.restorable} of ${result.muted} already deleted by Twitch` : '') +
+      (result.limitReached ? ' · stopped at the storage limit' : '') : 'nothing muted (yet)'}`);
+  } else log(SUB_ONLY.test(result.error || '') ? 'info' : 'warn', `VOD ${result.vodId}: not saved: ${result.error || 'failed'}`);
   return updateState((state) => {
     const rec = state.vods[result.vodId] || (state.vods[result.vodId] = { channel: '' });
     const before = rec.saved || 0;
@@ -276,6 +313,7 @@ async function finished(sender) {
     await api.tabs.remove(autoTab).catch(() => {});
     await session.set({ autoTab: null });
   }
+  log('info', `auto-save run finished${sender.tab && sender.tab.id === autoTab ? '; closed the background tab' : ''}`);
 }
 
 api.runtime.onMessage.addListener((msg, sender, sendResponse) => {

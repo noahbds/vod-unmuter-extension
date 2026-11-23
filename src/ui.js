@@ -261,7 +261,7 @@
         b.textContent = 'Preparing…';
         const { text } = await buildDiag();
         b.textContent = (await copyText(text)) ? 'Copied ✓ paste it in a GitHub issue' : 'Couldn\'t copy (see console)';
-        if (b.textContent.startsWith('Couldn')) console.log(text);
+        if (b.textContent.startsWith('Couldn')) console.log('[VOD Unmuter] · page: the browser refused to copy the diagnostic report to the clipboard; here it is, to copy by hand:\n\n' + text);
       },
     }, 'Copy diagnostic report');
     return b;

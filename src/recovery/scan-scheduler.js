@@ -1,13 +1,13 @@
 // Hook module (page and player worker): see src/hook.js.
 
-import { jobName, MAX_PARALLEL, SAMPLE_SIZE, SKIP_REST_AFTER_H } from '../shared/constants.js';
-import { saveMode } from '../shared/state.js';
-import { log } from '../shared/logger.js';
+import { fmtTime, jobName, MAX_PARALLEL, partName, SAMPLE_SIZE, SKIP_REST_AFTER_H, stretches } from '../shared/constants.js';
+import { saveMode, settings } from '../shared/state.js';
+import { log, logGroup } from '../shared/logger.js';
 import { vodInfo } from '../storage/idb.js';
 import { flushGone, loadGone } from '../storage/gone-cache.js';
 import { listSaved, loadSavedNums, updateVodInfo } from '../storage/saved-audio.js';
-import { resolveSegment, setResult } from './probe-resolver.js';
-import { isCurrent, jobs, sendResult, sendState, throttledProgress } from './recovery-state.js';
+import { describeChecks, resolveSegment, setResult } from './probe-resolver.js';
+import { describe, isCurrent, jobs, sendResult, sendState, throttledProgress } from './recovery-state.js';
 import { dropBehind, maybeSaveAll, scheduleCompress } from './save-compress-jobs.js';
 
 // Once a VOD is checked, its saved record learns how much of it was muted
@@ -24,13 +24,14 @@ export function noteVodTotals(job) {
 // A small pool of workers, each finishing one segment before taking the next.
 // A paused job (a quality the player isn't playing) stops taking segments
 // and waits until it's played again.
-export async function checkSegments(job, order, sample) {
+// `report` (optional) collects each part's result for the logs.
+export async function checkSegments(job, order, sample, report) {
   let next = 0;
   const worker = async () => {
     while (next < order.length) {
       if ((sample && job.skipRest) || job.paused) break;
       const s = order[next++];
-      try { await resolveSegment(s); } catch (e) { log('warn', `${jobName(job)}: checking segment ${s.num} failed`, e); }
+      try { await resolveSegment(s, report); } catch (e) { log('warn', `${jobName(job)}: checking ${partName(s)} failed, it stays muted for now`, e); }
       job.done++;
       if (s.source) job.found++;
       if (sample && sample.has(s)) {
@@ -53,7 +54,12 @@ export async function checkSegments(job, order, sample) {
 
 // New muted segments in a VOD that is still recording.
 export async function checkMore(job, segs) {
-  await checkSegments(job, segs, null);
+  const started = Date.now();
+  const report = [];
+  await checkSegments(job, segs, null, report);
+  const restored = segs.filter((s) => s.source).length;
+  logChecks(job, `${segs.length} newly muted part(s) (the VOD is still recording): ${restored} can be unmuted` +
+    (restored < segs.length ? ` · not yet: ${stretches(segs.filter((s) => !s.source))}` : '') + ` · checked in ${seconds(started)}`, report);
   sendResult(job);
   noteVodTotals(job);
   // Save the new ones too (or right after a save that is running now).
@@ -63,6 +69,7 @@ export async function checkMore(job, segs) {
 }
 
 export async function checkAll(job) {
+  const started = Date.now();
   job.saved = await loadSavedNums(job.vodKey);
   job.cachedGone = await loadGone(job);
   // Furthest position reached in this VOD before ("Parts ahead of me").
@@ -83,7 +90,12 @@ export async function checkAll(job) {
   for (let i = 0; i < Math.min(SAMPLE_SIZE, n); i++) sample.add(job.segs[Math.floor(((i + 0.5) * n) / Math.min(SAMPLE_SIZE, n))]);
   const order = [...sample].concat(job.segs.filter((s) => !sample.has(s)));
   job.sample = { size: sample.size, done: 0, found: 0 };
-  await checkSegments(job, order, sample);
+  log('info', `${jobName(job)}: checking ${n} muted parts (${fmtTime(job.segs.reduce((t, s) => t + s.duration, 0))} of a ${fmtTime(job.total)} VOD)` +
+    ` · ${job.saved.size} saved on this computer · ${job.cachedGone} files already known as deleted` +
+    ` · first a sample of ${sample.size} spread over the VOD, then the rest in playback order` +
+    (job.paused ? ' · paused until the player plays this quality' : '') + (job.auto ? ' · for auto-save' : ''));
+  const report = [];
+  await checkSegments(job, order, sample, report);
   if (job.skipRest) {
     // Old VOD, nothing left in the sample: only the saved copy counts.
     let skipped = 0;
@@ -100,11 +112,36 @@ export async function checkAll(job) {
   const restored = sendResult(job);
   const unknown = job.segs.filter((x) => !x.source && x.unknown).length;
   const gone = job.segs.length - restored - unknown;
-  log('info', `${jobName(job)}: ${restored}/${job.segs.length} muted segments can be unmuted` +
-    (gone ? ` · ${gone} deleted in every quality` + (job.skipped ? ` (${job.skipped} not checked one by one: old VOD)` : '') : '') +
-    (unknown ? ` · ${unknown} not checked yet (network problem, will retry)` : ''));
+  logChecks(job, `${checkSummary(job, restored, gone, unknown)} · checked in ${seconds(started)}`, report);
   if (isCurrent(job)) { maybeSaveAll(job); scheduleCompress(job); }
   retryUnknown(job, 1);
+}
+
+// The end of a VOD's check, in words: how much is muted, what can be
+// unmuted and from where, and why the rest can't.
+export function checkSummary(job, restored, gone, unknown) {
+  const muted = job.segs.reduce((n, s) => n + s.duration, 0);
+  const from = {};
+  for (const s of job.segs) if (s.source) { const k = describe(s).kind; from[k] = (from[k] || 0) + 1; }
+  const NAMES = { original: 'original files', backup: '"-unmuted" backups', other: 'other qualities', 'other-backup': 'other qualities\' backups', saved: 'saved copies' };
+  const sources = Object.entries(from).sort((a, b) => b[1] - a[1]).map(([k, n]) => `${n} from ${NAMES[k]}`).join(', ');
+  return `${restored}/${job.segs.length} muted parts can be unmuted` + (sources ? ` (${sources})` : '') +
+    ` · ${fmtTime(muted)} muted in a ${fmtTime(job.total)} VOD` +
+    (gone ? ` · ${gone} stay muted, deleted by Twitch in every quality: ${stretches(job.segs.filter((s) => !s.source && !s.unknown))}` +
+      (job.skipped ? ` (${job.skipped} of them not checked one by one: old VOD, nothing left in a sample of ${job.sample.size})` : '') : '') +
+    (unknown ? ` · ${unknown} not checked yet (network or server errors), retried in 30 s: ${stretches(job.segs.filter((s) => !s.source && s.unknown))}` : '') +
+    (job.cachedGone ? ` · ${job.cachedGone} files already known as deleted (no request)` : '');
+}
+
+const seconds = (since) => `${((Date.now() - since) / 1000).toFixed(1)} s`;
+
+// A check's summary, with each part's result under it (Debug logging only):
+// one collapsed group in the console.
+function logChecks(job, summary, report) {
+  const lines = settings.debug && report.length
+    ? ['("remembered": known from an earlier check or from the deleted-files cache, so no request was sent)'].concat(describeChecks(report))
+    : [];
+  logGroup('info', `${jobName(job)}: ${summary}`, lines);
 }
 
 // Segments that couldn't be checked because of network problems are
@@ -117,8 +154,15 @@ export function retryUnknown(job, attempt) {
     if (!jobs.includes(job)) return;
     const segs = todo();
     if (!segs.length) return;
-    log('info', `retrying ${segs.length} segment(s) that couldn't be checked (network problem)`);
-    await checkSegments(job, segs, null);
+    log('info', `${jobName(job)}: retrying ${segs.length} muted part(s) that couldn't be checked (network or server errors), try ${attempt} of 3: ${stretches(segs)}`);
+    const started = Date.now();
+    const report = [];
+    await checkSegments(job, segs, null, report);
+    const restored = segs.filter((s) => s.source).length;
+    const still = segs.filter((s) => !s.source && s.unknown);
+    logChecks(job, `retry ${attempt} of 3: ${restored} of ${segs.length} can be unmuted now, ${segs.length - restored - still.length} deleted by Twitch` +
+      (still.length ? `, ${still.length} still unanswered` + (attempt < 3 ? ` (next try in ${[0, 30, 120, 300][attempt + 1] / 60} min)` : ' (no more tries: they play muted unless playback finds their sound)') : '') +
+      ` · ${seconds(started)}`, report);
     sendResult(job);
     if (isCurrent(job)) maybeSaveAll(job);
     retryUnknown(job, attempt + 1);

@@ -81,6 +81,8 @@
       if (autoBusy) { sendResponse({ accepted: false, busy: true }); return undefined; }
       autoBusy = true;
       sendResponse({ accepted: true });
+      console.log('%c[VOD Unmuter]%c %s%c %s', 'color:#fff;background:#9146ff;border-radius:3px;padding:0 4px;font-weight:600', 'color:#9146ff;font-weight:600', 'bridge', '',
+        `auto-save asked by the extension: ${(msg.vodIds || []).length} VOD(s) to save in this tab, one at a time (${(msg.vodIds || []).join(', ')})`);
       (async () => {
         for (const vodId of msg.vodIds || []) {
           const result = await askPage({ action: 'autosave', vodId }, 30 * 60 * 1000);

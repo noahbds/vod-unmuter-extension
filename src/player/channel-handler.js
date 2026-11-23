@@ -17,6 +17,8 @@ if (channel) {
     if (!m) return;
     if (m.type === 'settings' && m.settings) {
       const before = updateSettings(m.settings);
+      const changed = Object.keys(settings).filter((k) => k in before && JSON.stringify(settings[k]) !== JSON.stringify(before[k]));
+      if (changed.length) log('debug', `settings: ${changed.map((k) => `${k} ${JSON.stringify(before[k])} → ${JSON.stringify(settings[k])}`).join(', ')}`);
       if (IS_PAGE) expireSaved(Number(settings.keepDays) || 0).catch(() => {});
       for (const job of jobs) {
         if (settings.saveAudio && !before.saveAudio) job.savedAll = false;
@@ -38,7 +40,8 @@ if (channel) {
         for (const s of job.segs) if (s.source === 'saved') { s.source = null; s.confirmed = false; }
       }
       if (IS_PAGE) {
-        try { await deleteSavedVod(m.vodKey); } catch (e) { log('warn', 'could not delete saved audio', e); }
+        log('info', `deleting the saved sound of VOD ${m.vodKey} (asked from the menu)`);
+        try { await deleteSavedVod(m.vodKey); } catch (e) { log('warn', `could not delete the saved sound of VOD ${m.vodKey}`, e); }
       }
       for (const job of jobs) if (job.vodKey === m.vodKey && job.finished) sendResult(job);
     } else if (m.type === 'position' && m.tab === TAB && typeof m.t === 'number') {

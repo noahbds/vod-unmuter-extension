@@ -89,7 +89,7 @@ export function rewritePlaylist(text, playlistUrl, auto, existing) {
       job.segs = kept;
       job.done = kept.filter((x) => x.source !== undefined).length;
       job.found = kept.filter((x) => x.source).length;
-      log('info', `${jobName(job)}: Twitch changed the muted parts: ${removed} no longer muted, ${added.length} newly muted, ${kept.length} now`);
+      log('info', `${jobName(job)}: Twitch changed the muted parts: ${removed} no longer muted, ${added.length} newly muted, ${kept.length} muted now`);
       scheduleResult(job);
     }
   }
@@ -149,7 +149,7 @@ export async function handleOther(input, init, url) {
     }
     if (RESTRICTED) {
       const muted = (text.match(/-muted\.ts/g) || []).length;
-      if (!restrictedNoted.has(vodBase)) { restrictedNoted.add(vodBase); log('info', `${muted} muted segments: Twitch only gives the original sound to www.twitch.tv, not to ${ORIGIN}`); }
+      if (!restrictedNoted.has(vodBase)) { restrictedNoted.add(vodBase); log('info', `VOD ${vodBase}: ${muted} muted parts not checked: Twitch only gives their original sound to www.twitch.tv, not to ${ORIGIN}`); }
       post({ type: 'restricted', vod: vodBase, muted, origin: ORIGIN });
       return res;
     }
@@ -169,7 +169,7 @@ export async function handleOther(input, init, url) {
     Object.defineProperty(out, 'url', { value: res.url });
     return out;
   } catch (e) {
-    log('error', 'could not rewrite the playlist: this VOD plays muted as usual', e);
+    log('error', `could not rewrite the playlist ${url}: this VOD plays muted as usual`, e);
     return res;
   }
 }
