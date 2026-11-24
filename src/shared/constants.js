@@ -44,8 +44,14 @@ export const fileLabel = (job, source) => {
   const file = slash < 0 ? source : source.slice(slash + 1);
   return `${prettyQuality(dir)} ${file === '-unmuted.ts' ? '"-unmuted" backup' : 'original file'}`;
 };
-export const SUFFIXES = ['.ts', '-unmuted.ts']; // where the original audio can live
-export const MUTED_RE = /^(.*?)(\d+)-muted\.ts(\?.*)?$/;
+// Where the original audio can live. These are names for the two files
+// ("original", "-unmuted" backup), also used as source names: in a VOD made
+// of MP4 files (HEVC/AV1) the real files end in ".mp4" / "-unmuted.mp4"
+// (see seg.urls in playlist-handler.js).
+export const SUFFIXES = ['.ts', '-unmuted.ts'];
+// A muted part: (folder)(number)-muted.(ts|mp4)(query)
+export const MUTED_RE = /^(.*?)(\d+)-muted\.(ts|mp4)(\?.*)?$/;
+export const HAS_MUTED_RE = /-muted\.(ts|mp4)/;
 export const MAX_PARALLEL = 48;   // background checks (tiny requests, HTTP/2; measured: 14 s -> 10 s)
 export const SAVE_PARALLEL = 8;    // background downloads for saving (measured: 76 s -> 32 s for 253)
 // Used only if the master playlist was not seen. Best quality first.

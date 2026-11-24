@@ -6,7 +6,7 @@ import { goneTx } from './idb.js';
 
 export const GONE_KEEP_DAYS = 90;
 
-export const GONE_RE = /^([^/?]+)\/(\d+)(\.ts|-unmuted\.ts)(?:\?.*)?$/;
+export const GONE_RE = /^([^/?]+)\/(\d+)(\.ts|-unmuted\.ts|\.mp4|-unmuted\.mp4)(?:\?.*)?$/;
 export const goneQueue = new Map(); // vod folder -> { "<quality>/<suffix>" -> Set(numbers) }
 export let goneTimer = null;
 

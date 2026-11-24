@@ -1,15 +1,16 @@
 // Hook module (page and player worker): see src/hook.js.
 
 import { fileLabel, fmtTime, isBehind, isMiss, jobName, notAhead, partName, partOf, POSITION_WAIT_MS, prettyQuality, SAVE_PARALLEL, stretches, SUFFIXES } from '../shared/constants.js';
-import { known, realFetch, saveMode, settings } from '../shared/state.js';
+import { known, realFetch, saveMode, savingOn, settings } from '../shared/state.js';
 import { log } from '../shared/logger.js';
 import { extractAudio } from '../media/transport-stream.js';
-import { adtsInfo, packetsToAdts, splitAdts } from '../media/adts-muxer.js';
+import { adtsInfo, concat, packetsToAdts, splitAdts } from '../media/adts-muxer.js';
+import { extractMp4Audio, mp4AudioToAdts } from '../media/fragmented-mp4.js';
 import { decodeFrames, deflate, encoderDelay, KBPS, reencode } from '../media/aac-compression.js';
 import { recBytes } from '../storage/idb.js';
 import { markMissing } from '../storage/gone-cache.js';
 import { deleteSavedSegment, loadRecord, loadSaved, makeRoom, putRecord, recordToAudio } from '../storage/saved-audio.js';
-import { saveDirs, saveLimited, urlFor } from './probe-resolver.js';
+import { loadInit, saveDirs, saveLimited, urlFor } from './probe-resolver.js';
 import { jobOf, jobs, scheduleResult, sendResult } from './recovery-state.js';
 import { noteVodTotals } from './scan-scheduler.js';
 
@@ -76,14 +77,39 @@ export async function packLossless(audio) {
   return { fmt: 'deflate', type: audio.type, pts: audio.pts, data: packed.data, packed: packed.packed };
 }
 
-export async function saveFromBytes(seg, bytes) {
+// Its sound as ADTS AAC frames, deflated (MP4 VODs: see mp4AudioToAdts).
+export async function packAdts(frames, pts) {
+  const packed = await deflate(concat(frames));
+  return { fmt: 'adts', type: 0x0f, pts, data: packed.data, packed: packed.packed };
+}
+
+// The AAC frames of a downloaded MP4 file of quality `dir`, and their start
+// on a 90 kHz clock (like MPEG-TS), or null.
+export async function mp4Frames(job, bytes, dir) {
+  const init = await loadInit(job, dir);
+  const audio = init && extractMp4Audio(bytes, init);
+  const frames = audio && mp4AudioToAdts(audio);
+  return frames ? { frames, pts: Math.round((audio.start * 90000) / audio.timescale) } : null;
+}
+
+// `dir`: the quality `bytes` were downloaded from (MP4 VODs need its init
+// file to find the sound).
+export async function saveFromBytes(seg, bytes, dir) {
   const job = seg.job;
-  if (!settings.saveAudio || job.noSave || job.limitReached || job.saved.has(seg.num)) return;
-  const audio = extractAudio(bytes);
-  if (!audio) return;
+  if (!savingOn(job) || job.limitReached || job.saved.has(seg.num)) return;
+  let pack;
+  if (job.mp4) {
+    const got = await mp4Frames(job, bytes, dir || job.dir);
+    if (!got) return;
+    pack = () => packAdts(got.frames, got.pts);
+  } else {
+    const audio = extractAudio(bytes);
+    if (!audio) return;
+    pack = () => packLossless(audio);
+  }
   const info = await serially(async () => {
     if (job.limitReached || job.saved.has(seg.num)) return null;
-    const rec = await packLossless(audio);
+    const rec = await pack();
     if (!(await makeRoom(job, recBytes(rec)))) {
       job.limitReached = true;
       scheduleResult(job);
@@ -99,7 +125,7 @@ export async function saveFromBytes(seg, bytes) {
 // Save every muted part that can still be unmuted, in the background
 // ("unplayed" mode: except the parts already watched).
 export async function maybeSaveAll(job, force) {
-  if (!settings.saveAudio || job.noSave) return;
+  if (!savingOn(job)) return;
   if (!job.finished || job.saving || job.savedAll) return;
   const ahead = saveMode() === 'unplayed';
   // "Ahead of me" in the player: wait for its position first, so nothing
@@ -130,7 +156,7 @@ export async function maybeSaveAll(job, force) {
     (ahead ? ` ahead of you ("Parts ahead of me"${job.position !== undefined ? `, from ${fmtTime(job.position)}` : ''})` : ' ("Every muted part")') +
     ` · downloading from ${prettyQuality(dirs[0])} first (smallest file with full-quality sound), ${SAVE_PARALLEL} at a time`);
   await Promise.all(todo.map((seg) => saveLimited(async () => {
-    if (!settings.saveAudio || job.noSave || job.limitReached || job.saved.has(seg.num)) return;
+    if (!savingOn(job) || job.limitReached || job.saved.has(seg.num)) return;
     if (skip(seg)) { passed++; return; } // the player moved past it meanwhile
     for (const dir of dirs) {
       for (const sfx of SUFFIXES) {
@@ -140,7 +166,7 @@ export async function maybeSaveAll(job, force) {
           const r = await realFetch.call(scope, url, { cache: 'no-store' });
           if (!r.ok) { if (isMiss(r.status)) markMissing(url, jobOf(url)); continue; }
           known.set(url, true);
-          await saveFromBytes(seg, new Uint8Array(await r.arrayBuffer()));
+          await saveFromBytes(seg, new Uint8Array(await r.arrayBuffer()), dir);
           if (job.saved.has(seg.num)) from[prettyQuality(dir)] = (from[prettyQuality(dir)] || 0) + 1;
           return;
         } catch (e) { log('debug', `${jobName(job)}: saving ${partName(seg)}: downloading the ${fileLabel(job, dir + '/' + sfx)} failed, trying the next file`, e); }
@@ -185,9 +211,15 @@ export async function leadInFrames(job, num, cache) {
   }
   for (const dir of saveDirs(job)) {
     try {
-      const r = await realFetch.call(scope, job.vodBase + dir + '/' + (num - 1) + '.ts');
+      const r = await realFetch.call(scope, job.vodBase + dir + '/' + (num - 1) + (job.mp4 ? '.mp4' : '.ts'));
       if (!r.ok) continue;
-      const audio = extractAudio(new Uint8Array(await r.arrayBuffer()));
+      const bytes = new Uint8Array(await r.arrayBuffer());
+      if (job.mp4) {
+        const got = await mp4Frames(job, bytes, dir);
+        if (got) return got.frames.slice(-8);
+        continue;
+      }
+      const audio = extractAudio(bytes);
       if (audio) return splitAdts(packetsToAdts(audio.packets)).slice(-8);
     } catch (e) { /* try the next quality */ }
   }
@@ -197,7 +229,7 @@ export async function leadInFrames(job, num, cache) {
 // One compression run at a time per VOD; a request during a run queues
 // one more run (for segments saved meanwhile). Resolves when done.
 export function compressJob(job) {
-  if (!settings.saveAudio || job.noSave || !job.saved.size) return Promise.resolve();
+  if (!savingOn(job) || !job.saved.size) return Promise.resolve();
   if (job.compressPromise) { job.compressAgain = true; return job.compressPromise; }
   job.compressAgain = false;
   job.compressPromise = runCompress(job).finally(() => { job.compressPromise = null; });
@@ -219,7 +251,7 @@ export async function runCompress(job) {
     job.compressDone = 0;
     const cache = { num: null, frames: null };
     for (const num of nums) {
-      if (!settings.saveAudio || job.noSave) break;
+      if (!savingOn(job)) break;
       job.compressDone++;
       if (job.compressDone % 10 === 0) scheduleResult(job);
       const rec = await loadRecord(job.vodKey, num);

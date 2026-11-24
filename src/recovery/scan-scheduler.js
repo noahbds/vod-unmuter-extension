@@ -102,6 +102,7 @@ export async function checkAll(job) {
   log('info', `${jobName(job)}: checking ${n} muted parts (${fmtTime(job.segs.reduce((t, s) => t + s.duration, 0))} of a ${fmtTime(job.total)} VOD)` +
     ` · ${job.saved.size} saved on this computer · ${job.cachedGone} files already known as deleted` +
     ` · first a sample of ${sample.size} spread over the VOD, then the rest in playback order` +
+    (job.mp4 ? ' · MP4 VOD (HEVC/AV1)' : '') +
     (job.paused ? ' · paused until the player plays this quality' : '') + (job.auto ? ' · for auto-save' : ''));
   const report = [];
   await checkSegments(job, order, sample, report);

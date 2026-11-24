@@ -2,7 +2,7 @@
 
 import { settings } from '../shared/state.js';
 import { log } from '../shared/logger.js';
-import { adtsInfo, muxAdts, splitAdts } from '../media/adts-muxer.js';
+import { adtsInfo, muxAdts, packetsToAdts, splitAdts } from '../media/adts-muxer.js';
 import { inflate } from '../media/aac-compression.js';
 import { audioRange, idb, recBytes, vodInfo } from './idb.js';
 import { expireGone } from './gone-cache.js';
@@ -32,6 +32,20 @@ export async function recordToAudio(rec) {
     return frames.length ? { type: 0x0f, pts: rec.pts, packets: muxAdts(frames, rec.pts, adtsInfo(frames[0]).sampleRate) } : null;
   }
   return null;
+}
+
+// The AAC frames of a saved record and their start time (90 kHz): what an
+// MP4 VOD's saved copy becomes (see adtsToMp4Audio).
+export async function recordToFrames(rec) {
+  if (!rec) return null;
+  if (rec.fmt === 'adts' || rec.fmt === 'aac') {
+    const frames = splitAdts(rec.fmt === 'adts' && rec.packed ? await inflate(rec.data) : rec.data);
+    return frames.length ? { pts: rec.pts, frames } : null;
+  }
+  const audio = await recordToAudio(rec);
+  if (!audio || audio.type !== 0x0f) return null;
+  const frames = splitAdts(packetsToAdts(audio.packets));
+  return frames.length ? { pts: audio.pts, frames } : null;
 }
 
 export async function loadRecord(vod, num) {

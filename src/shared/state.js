@@ -29,6 +29,9 @@ export let settings = { enabled: true, saveAudio: true, saveMode: 'whole', keepD
 // (Older versions had "watched"; it now means "unplayed".)
 export const saveMode = () => (settings.saveMode === 'whole' ? 'whole' : 'unplayed');
 // New settings from the extension (via the channel). Returns the previous ones.
+// Saving is on for this job: not switched off, and not deleted from the
+// menu this session.
+export const savingOn = (job) => !!(settings.saveAudio && !job.noSave);
 export function updateSettings(patch) {
   const before = settings;
   settings = Object.assign({}, settings, patch);
@@ -48,3 +51,4 @@ export const segments = new Map();    // rewritten segment URL -> muted segment 
 export const playlists = new Map();   // playlist URL -> { text, job }
 export const renditions = new Map();  // VOD folder URL -> quality dirs, best first
 export const vodIdsByBase = new Map(); // VOD folder URL -> Twitch VOD id
+export const mp4Inits = new Map();     // init-0.mp4 URL -> Promise<bytes or null>

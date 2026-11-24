@@ -1,32 +1,38 @@
 // Hook module (page and player worker): see src/hook.js.
 
 import { fileLabel, isMiss, jobName, notAhead, partName, prettyQuality, requestFor, SUFFIXES } from '../shared/constants.js';
-import { known, realFetch, saveMode, segments, settings } from '../shared/state.js';
+import { known, realFetch, saveMode, savingOn, segments } from '../shared/state.js';
 import { describeArg, log } from '../shared/logger.js';
 import { extractAudio, spliceAudio } from '../media/transport-stream.js';
+import { adtsToMp4Audio, extractMp4Audio, spliceMp4Audio } from '../media/fragmented-mp4.js';
 import { markMissing } from '../storage/gone-cache.js';
-import { loadSaved } from '../storage/saved-audio.js';
-import { donorSources, probe, urlFor } from '../recovery/probe-resolver.js';
+import { loadRecord, loadSaved, recordToFrames } from '../storage/saved-audio.js';
+import { donorSources, loadInit, probe, urlFor } from '../recovery/probe-resolver.js';
 import { jobOf, jobs, noteActivity, scheduleResult } from '../recovery/recovery-state.js';
 import { retryUnknown } from '../recovery/scan-scheduler.js';
 import { saveFromBytes } from '../recovery/save-compress-jobs.js';
 import { handleOther } from './playlist-handler.js';
 
 // ------------------------------------------------------------ segments
-export const segmentResponse = (body) =>
-  new Response(body, { status: 200, headers: { 'Content-Type': 'video/mp2t' } });
+export const segmentResponse = (body, type = 'video/mp2t') =>
+  new Response(body, { status: 200, headers: { 'Content-Type': type } });
 
 // In "Whole VOD" mode, or in "Parts ahead of me" once the player's position is
 // known and this part is ahead of it, save the sound from the bytes just fetched.
 export const canSaveFetched = (seg) =>
-  !!(settings.saveAudio && !seg.job.noSave && !seg.job.saved.has(seg.num) &&
+  !!(savingOn(seg.job) && !seg.job.saved.has(seg.num) &&
     (saveMode() === 'whole' || (seg.job.position !== undefined && !seg.played && !notAhead(seg.job, seg))));
 
-// Downloads the muted segment and puts `audio` into it.
-export async function spliced(seg, input, init, audio) {
+// Downloads the muted segment and puts `audio` into it (MP4 VOD: `ownInit`
+// is the init file of the quality being watched).
+export async function spliced(seg, input, init, audio, ownInit) {
   const muted = await realFetch.call(scope, requestFor(seg.urls.muted, input), init);
   if (!muted.ok) return { res: muted, ok: false };
   const mb = new Uint8Array(await muted.arrayBuffer());
+  if (seg.job.mp4) {
+    const out = audio && ownInit && spliceMp4Audio(mb, ownInit, audio);
+    return { res: segmentResponse(out || mb, 'video/mp4'), ok: !!out };
+  }
   const out = audio && spliceAudio(mb, audio);
   return { res: segmentResponse(out || mb), ok: !!out };
 }
@@ -53,7 +59,7 @@ export async function fetchSegment(seg, input, init) {
         known.set(url, true);
         confirm(seg, sfx);
         const save = canSaveFetched(seg);
-        if (save) r.clone().arrayBuffer().then((b) => saveFromBytes(seg, new Uint8Array(b))).catch(() => {});
+        if (save) r.clone().arrayBuffer().then((b) => saveFromBytes(seg, new Uint8Array(b), job.dir)).catch(() => {});
         played(`the ${fileLabel(job, sfx)} (${r.status}), as it is` + (save ? '; its sound is being saved' : ''));
         return r;
       }
@@ -70,9 +76,14 @@ export async function fetchSegment(seg, input, init) {
   // b. A copy saved on this computer earlier.
   if (job.saved.has(seg.num)) {
     try {
-      const audio = await loadSaved(job.vodKey, seg.num);
+      let audio, ownInit = null;
+      if (job.mp4) {
+        ownInit = await loadInit(job, job.dir);
+        const saved = ownInit && await recordToFrames(await loadRecord(job.vodKey, seg.num));
+        audio = saved && adtsToMp4Audio(saved.frames, saved.pts, ownInit);
+      } else audio = await loadSaved(job.vodKey, seg.num);
       if (audio) {
-        const { res, ok } = await spliced(seg, input, init, audio);
+        const { res, ok } = await spliced(seg, input, init, audio, ownInit);
         if (ok) { confirm(seg, 'saved'); played(`the ${fileLabel(job, 'saved')}, spliced into the muted ${prettyQuality(job.dir)} file`); return res; }
         if (res.ok) {
           seg.reason = 'damaged';
@@ -92,18 +103,23 @@ export async function fetchSegment(seg, input, init) {
   const found = await Promise.all(donors.map((s) => probe(urlFor(seg, s), true)));
   const donor = donors[found.indexOf(true)];
   if (found.includes(null)) uncertain = true;
-  steps.push(`other qualities asked at once: ${donors.map((s, i) => `${prettyQuality(s.split('/')[0])} ${found[i] ? 'found' : found[i] === false ? 'deleted' : 'no answer'}`).join(', ')}`);
+  if (donors.length) steps.push(`other qualities asked at once: ${donors.map((s, i) => `${prettyQuality(s.split('/')[0])} ${found[i] ? 'found' : found[i] === false ? 'deleted' : 'no answer'}`).join(', ')}`);
   if (donor) {
     try {
       const other = await realFetch.call(scope, requestFor(urlFor(seg, donor), input), init);
       if (other.ok) {
         const ob = new Uint8Array(await other.arrayBuffer());
-        const audio = extractAudio(ob);
-        const { res, ok } = await spliced(seg, input, init, audio);
+        let audio, ownInit = null;
+        if (job.mp4) {
+          const inits = await Promise.all([loadInit(job, job.dir), loadInit(job, donor.split('/')[0])]);
+          ownInit = inits[0];
+          audio = inits[1] && extractMp4Audio(ob, inits[1]);
+        } else audio = extractAudio(ob);
+        const { res, ok } = await spliced(seg, input, init, audio, ownInit);
         if (ok) {
           confirm(seg, donor);
           const save = canSaveFetched(seg);
-          if (save) saveFromBytes(seg, ob);
+          if (save) saveFromBytes(seg, ob, donor.split('/')[0]);
           played(`the sound of the ${fileLabel(job, donor)} (${(ob.byteLength / 1e6).toFixed(1)} MB downloaded), spliced into the muted ${prettyQuality(job.dir)} file` + (save ? '; its sound is being saved' : ''));
           return res;
         }

@@ -46,6 +46,7 @@
     // @include media/transport-stream.js
     // @include media/adts-muxer.js
     // @include media/aac-compression.js
+    // @include media/fragmented-mp4.js
     // @include storage/idb.js
     // @include storage/gone-cache.js
     // @include storage/saved-audio.js
@@ -64,7 +65,7 @@
     // @include recovery/auto-save.js
     /* vu:page-only:end */
 
-    scope.__vodUnmuterDebug = { jobs, renditions, scanTs, extractAudio, spliceAudio, listSaved, loadRecord, recordToAudio, muxAdts, splitAdts, packetsToAdts, encoderDelay };
+    scope.__vodUnmuterDebug = { jobs, renditions, scanTs, extractAudio, spliceAudio, readMp4Init, extractMp4Audio, spliceMp4Audio, mp4AudioToAdts, adtsToMp4Audio, recordToFrames, listSaved, loadRecord, recordToAudio, muxAdts, splitAdts, packetsToAdts, encoderDelay };
   }
 
   // 1) Hook the page itself (in case the player ever runs without a worker).

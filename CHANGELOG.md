@@ -25,6 +25,27 @@ In the player:
 - **Keyboard and screen-reader access:** the counter button sets
   `aria-expanded`, pressing `Escape` closes the open panel and returns focus
   to the button, and the panel's list is reachable with `Tab`.
+- **Fix: VOD id not read from Twitch's new playlist address.** Twitch's
+  player now asks for `usher.ttvnw.net/vod/v2/<id>.m3u8`; the id is read from
+  both forms again, so saves get their title and link without waiting for
+  the page.
+- **MP4 VODs (HEVC/AV1) are unmuted when the original is still there.**
+  Twitch now serves some VODs as fragmented MP4 (`init-0.mp4`, `123.mp4`,
+  `123-muted.mp4`) instead of MPEG-TS; the extension ignored them, and the
+  panel said it couldn't reach the player. Their muted parts now play the
+  original (`123.mp4`, then `123-unmuted.mp4`) of the quality being watched,
+  else the sound of another quality spliced into the muted file
+  (`src/media/fragmented-mp4.js`: the AAC samples are swapped and the
+  moof/mdat pairs rewritten; the AAC settings must match and the sound must
+  start and end within 0.1 s). Their sound is saved too (while watching and
+  by auto-save), in the same format as MPEG-TS VODs: the AAC frames get an
+  ADTS header and a 90 kHz start time, so compression, backups and the
+  storage limit work unchanged; when played, a saved copy is turned back
+  into MP4 samples on the watched quality's clock and spliced in.
+- **Diagnostics:** the report now says when a VOD's playlist had no muted
+  parts in it (with two example file names), and with debug logging on, when
+  a playlist request was refused (e.g. `403` for a sub-only VOD) and which
+  qualities the master playlist listed.
 
 Saved audio, backups and auto-save:
 - **VOD title and direct link in the saved list.** Saved VODs now remember

@@ -1,15 +1,16 @@
 // Hook module (page and player worker): see src/hook.js.
 
-import { jobName, MUTED_RE } from '../shared/constants.js';
+import { HAS_MUTED_RE, jobName, MUTED_RE } from '../shared/constants.js';
 import { INSTANCE, IS_PAGE, ORIGIN, playlists, post, realFetch, renditions, RESTRICTED, segments, settings, vodIdsByBase } from '../shared/state.js';
-import { log } from '../shared/logger.js';
+import { log, shortUrl } from '../shared/logger.js';
 import { currentJob, forgetCurrent, jobs, scheduleResult, sendState, switchVod } from '../recovery/recovery-state.js';
 import { checkAll, checkMore } from '../recovery/scan-scheduler.js';
 
 // ------------------------------------------------------------ playlists
 export function readMaster(text, masterUrl) {
   const byVod = new Map();
-  const idMatch = String(masterUrl || '').match(/\/vod\/(\d+)\.m3u8/);
+  // "/vod/123.m3u8", or "/vod/v2/123.m3u8" (Twitch's player since late 2026).
+  const idMatch = String(masterUrl || '').match(/\/vod\/(?:v\d+\/)?(\d+)\.m3u8/);
   for (const raw of text.split('\n')) {
     const line = raw.trim();
     if (!line || line[0] === '#') continue;
@@ -27,6 +28,7 @@ export function readMaster(text, masterUrl) {
     renditions.set(vodBase, dirs);
     if (idMatch) vodIdsByBase.set(vodBase, idMatch[1]);
   }
+  log('debug', `master playlist${idMatch ? ' of VOD ' + idMatch[1] : ''}: ${[...byVod.values()].flat().join(', ') || 'no qualities'}`);
 }
 
 // `existing`: the job made from an earlier copy of this playlist. A VOD that
@@ -60,6 +62,12 @@ export function rewritePlaylist(text, playlistUrl, auto, existing) {
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i].trim();
     if (line.startsWith('#EXTINF:')) { duration = parseFloat(line.slice(8)) || 0; continue; }
+    if (line.startsWith('#EXT-X-MAP:')) {
+      // MP4 VOD: its init file, named the same in every quality ("init-0.mp4").
+      const uri = (line.match(/URI="([^"]+)"/) || [])[1];
+      if (uri) { const u = new URL(uri, playlistUrl); job.initName = u.pathname.slice(u.pathname.lastIndexOf('/') + 1) + u.search; }
+      continue;
+    }
     if (!line || line[0] === '#') continue;
     const m = line.match(MUTED_RE);
     if (m) {
@@ -68,10 +76,15 @@ export function rewritePlaylist(text, playlistUrl, auto, existing) {
         seg.start = time;
         seg.duration = duration;
       } else {
-        const at = (suffix) => new URL(m[1] + m[2] + suffix + (m[3] || ''), playlistUrl).href;
+        // MP4 VOD (HEVC/AV1): "123-muted.mp4". Same names, other ending;
+        // only the files of the quality being watched are used (no other
+        // qualities, no saving: that needs reading MP4 audio).
+        const ext = '.' + m[3];
+        if (ext === '.mp4') job.mp4 = true;
+        const at = (suffix) => new URL(m[1] + m[2] + suffix + (m[4] || ''), playlistUrl).href;
         seg = {
-          job, num: Number(m[2]), query: m[3] || '', start: time, duration,
-          urls: { '.ts': at('.ts'), '-unmuted.ts': at('-unmuted.ts'), muted: at('-muted.ts') },
+          job, num: Number(m[2]), query: m[4] || '', start: time, duration,
+          urls: { '.ts': at(ext), '-unmuted.ts': at('-unmuted' + ext), muted: at('-muted' + ext) },
           source: undefined, confirmed: false,
         };
         job.segs.push(seg);
@@ -130,9 +143,15 @@ export function rewritePlaylist(text, playlistUrl, auto, existing) {
 
 // ------------------------------------------------------------ fetch hook
 export const restrictedNoted = new Set();
+export const unmutedNoted = new Set(); // VOD folders already logged as "no muted parts"
 export async function handleOther(input, init, url) {
   const res = await realFetch.call(scope, input, init);
-  if (!settings.enabled || !url || !res.ok || !/\.m3u8(\?|$)/.test(url)) return res;
+  if (!settings.enabled || !url || !/\.m3u8(\?|$)/.test(url)) return res;
+  if (!res.ok) {
+    // e.g. 403 for a sub-only VOD: another extension may answer instead.
+    log('debug', `playlist request refused (${res.status}): ${url}`);
+    return res;
+  }
   try {
     const playlistUrl = res.url || url;
     let entry = playlists.get(playlistUrl);
@@ -140,7 +159,7 @@ export async function handleOther(input, init, url) {
     if (text.includes('#EXT-X-STREAM-INF')) { readMaster(text, playlistUrl); return res; }
     const clean = playlistUrl.split('?')[0];
     const vodBase = clean.slice(0, clean.lastIndexOf('/', clean.lastIndexOf('/') - 1) + 1);
-    if (!text.includes('-muted.ts')) {
+    if (!HAS_MUTED_RE.test(text)) {
       if (entry && jobs.includes(entry.job)) {
         // Twitch unmuted every part of this VOD: forget the old job.
         log('info', `${jobName(entry.job)}: Twitch no longer mutes any part of this VOD`);
@@ -151,11 +170,18 @@ export async function handleOther(input, init, url) {
         forgetCurrent(entry.job);
         return res;
       }
+      if (!IS_PAGE && !unmutedNoted.has(vodBase) && text.includes('#EXTINF')) {
+        // Said once per VOD: if Twitch shows muted parts anyway, this line
+        // tells a bug report what the playlist looked like.
+        unmutedNoted.add(vodBase);
+        const files = text.split('\n').map((l) => l.trim()).filter((l) => l && l[0] !== '#');
+        log('info', `playlist ${playlistUrl}: no muted part in it (${files.length} files, e.g. ${files.slice(0, 2).map(shortUrl).join(', ') || 'none'})`);
+      }
       switchVod(vodBase, null);
       return res;
     }
     if (RESTRICTED) {
-      const muted = (text.match(/-muted\.ts/g) || []).length;
+      const muted = (text.match(/-muted\.(ts|mp4)/g) || []).length;
       if (!restrictedNoted.has(vodBase)) { restrictedNoted.add(vodBase); log('info', `VOD ${vodBase}: ${muted} muted parts not checked: Twitch only gives their original sound to www.twitch.tv, not to ${ORIGIN}`); }
       post({ type: 'restricted', vod: vodBase, muted, origin: ORIGIN });
       return res;

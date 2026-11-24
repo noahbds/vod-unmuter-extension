@@ -1,7 +1,7 @@
 // Hook module (page and player worker): see src/hook.js.
 
 import { FALLBACK_DIRS, fileLabel, fmtTime, isMiss, jobName, MAX_PARALLEL, partName, prettyQuality, SAVE_PARALLEL, sleep, SUFFIXES } from '../shared/constants.js';
-import { known, pending, realFetch, renditions } from '../shared/state.js';
+import { known, mp4Inits, pending, realFetch, renditions } from '../shared/state.js';
 import { log } from '../shared/logger.js';
 import { markMissing } from '../storage/gone-cache.js';
 import { jobOf, reasonOf } from './recovery-state.js';
@@ -81,10 +81,22 @@ export function donorSources(seg, dirs) {
   return (dirs || donorDirs(seg.job)).map((dir) => dir + '/.ts');
 }
 
+// An MP4 VOD's init file of a quality (track list), fetched once.
+export function loadInit(job, dir) {
+  if (!job.initName) return Promise.resolve(null);
+  const url = job.vodBase + dir + '/' + job.initName;
+  if (!mp4Inits.has(url)) {
+    mp4Inits.set(url, realFetch.call(scope, url).then((r) => (r.ok ? r.arrayBuffer().then((b) => new Uint8Array(b)) : null)).catch(() => null)
+      .then((b) => { if (!b) mp4Inits.delete(url); return b; })); // not cached when it failed
+  }
+  return mp4Inits.get(url);
+}
+
 export function urlFor(seg, source) {
   const slash = source.indexOf('/');
   if (slash < 0) return seg.urls[source];
-  return seg.job.vodBase + source.slice(0, slash) + '/' + seg.num + source.slice(slash + 1) + seg.query;
+  const sfx = source.slice(slash + 1);
+  return seg.job.vodBase + source.slice(0, slash) + '/' + seg.num + (seg.job.mp4 ? sfx.replace(/\.ts$/, '.mp4') : sfx) + seg.query;
 }
 
 // Both return the first source found, or null. `seg.unknown` is set when

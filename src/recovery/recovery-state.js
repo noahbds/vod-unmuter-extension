@@ -107,7 +107,9 @@ export function forgetCurrent(job) {
 // downloads is the one being played (playlists alone don't count: the
 // player may load several when adapting quality).
 export function noteActivity(url) {
-  if (!/\.ts(\?|$)/.test(url)) return;
+  // Numbered media files only: an MP4 VOD's "init-0.mp4" is also fetched to
+  // probe a quality (TwitchNoSub does it for every quality), not to play it.
+  if (!/\/\d+(-unmuted|-muted)?\.(ts|mp4)(\?|$)/.test(url)) return;
   for (const job of jobs) {
     if (url.startsWith(job.base)) {
       const wasPlaying = job.lastSegmentAt && Date.now() - job.lastSegmentAt < PLAYING_MS;
@@ -146,6 +148,7 @@ export function sendResult(job, checking) {
       muted: job.segs.length, restored, fromOther, fromSaved, mutedSeconds, restoredSeconds,
       skipped: job.skipped || 0, unknown,
       reasons: job.segs.reduce((m, x) => { const r = reasonOf(x); m[r] = (m[r] || 0) + 1; return m; }, {}),
+      mp4: !!job.mp4,
       checkedQualities: allDirs(job).concat(allDirs(job).includes('audio_only') ? [] : ['audio_only']).map(prettyQuality),
       channel: job.vodKey.split('_').slice(1, -2).join('_'), endedAt: job.endedAt || null, sampleSize: job.sample ? job.sample.size : 0,
       ranges: buildRanges(job.segs),

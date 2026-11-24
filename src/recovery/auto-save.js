@@ -44,7 +44,7 @@ export async function autoSave(vodId, title) {
     if (!first) throw new Error('no video in this VOD');
     const mediaUrl = new URL(first, masterUrl).href;
     const text = await realFetch.call(scope, mediaUrl).then((r) => r.text());
-    out.muted = (text.match(/-muted\.ts/g) || []).length;
+    out.muted = (text.match(/-muted\.(ts|mp4)/g) || []).length;
     if (!out.muted) { out.ok = true; out.restorable = 0; out.saved = 0; return out; }
 
     job = rewritePlaylist(text, mediaUrl, true).job;
