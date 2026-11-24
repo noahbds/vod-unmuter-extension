@@ -1,6 +1,6 @@
 // Hook module (page and player worker): see src/hook.js.
 
-import { fileLabel, isMiss, jobName, partName, prettyQuality, requestFor, SUFFIXES } from '../shared/constants.js';
+import { fileLabel, isMiss, jobName, notAhead, partName, prettyQuality, requestFor, SUFFIXES } from '../shared/constants.js';
 import { known, realFetch, saveMode, segments, settings } from '../shared/state.js';
 import { describeArg, log } from '../shared/logger.js';
 import { extractAudio, spliceAudio } from '../media/transport-stream.js';
@@ -15,6 +15,12 @@ import { handleOther } from './playlist-handler.js';
 // ------------------------------------------------------------ segments
 export const segmentResponse = (body) =>
   new Response(body, { status: 200, headers: { 'Content-Type': 'video/mp2t' } });
+
+// In "Whole VOD" mode, or in "Parts ahead of me" once the player's position is
+// known and this part is ahead of it, save the sound from the bytes just fetched.
+export const canSaveFetched = (seg) =>
+  !!(settings.saveAudio && !seg.job.noSave && !seg.job.saved.has(seg.num) &&
+    (saveMode() === 'whole' || (seg.job.position !== undefined && !seg.played && !notAhead(seg.job, seg))));
 
 // Downloads the muted segment and puts `audio` into it.
 export async function spliced(seg, input, init, audio) {
@@ -46,7 +52,7 @@ export async function fetchSegment(seg, input, init) {
       if (r.ok) {
         known.set(url, true);
         confirm(seg, sfx);
-        const save = settings.saveAudio && !job.noSave && !job.saved.has(seg.num) && saveMode() === 'whole';
+        const save = canSaveFetched(seg);
         if (save) r.clone().arrayBuffer().then((b) => saveFromBytes(seg, new Uint8Array(b))).catch(() => {});
         played(`the ${fileLabel(job, sfx)} (${r.status}), as it is` + (save ? '; its sound is being saved' : ''));
         return r;
@@ -96,7 +102,7 @@ export async function fetchSegment(seg, input, init) {
         const { res, ok } = await spliced(seg, input, init, audio);
         if (ok) {
           confirm(seg, donor);
-          const save = settings.saveAudio && !job.noSave && !job.saved.has(seg.num) && saveMode() === 'whole';
+          const save = canSaveFetched(seg);
           if (save) saveFromBytes(seg, ob);
           played(`the sound of the ${fileLabel(job, donor)} (${(ob.byteLength / 1e6).toFixed(1)} MB downloaded), spliced into the muted ${prettyQuality(job.dir)} file` + (save ? '; its sound is being saved' : ''));
           return res;

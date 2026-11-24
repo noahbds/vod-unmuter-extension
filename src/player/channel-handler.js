@@ -8,6 +8,7 @@ import { openDb } from '../storage/idb.js';
 import { deleteSavedVod, expireSaved, loadSavedNums, storageFull, updateVodInfo } from '../storage/saved-audio.js';
 import { setResult } from '../recovery/probe-resolver.js';
 import { currentJob, isCurrent, jobs, reasonOf, scheduleResult, sendResult } from '../recovery/recovery-state.js';
+import { noteVodTotals } from '../recovery/scan-scheduler.js';
 import { compressJob, dropBehind, maybeSaveAll } from '../recovery/save-compress-jobs.js';
 
 // ------------------------------------------------------------ messages
@@ -48,6 +49,13 @@ if (channel) {
       // Where the player is (sent every second, even paused).
       const job = currentJob;
       if (!job || job.auto) return;
+      let metaChanged = false;
+      if (typeof m.vodId === 'string' && m.vodId && job.vodId !== m.vodId) { job.vodId = m.vodId; metaChanged = true; }
+      if (typeof m.title === 'string' && m.title && job.title !== m.title) { job.title = m.title; metaChanged = true; }
+      if (metaChanged) {
+        for (const j of jobs) if (j.vodKey === job.vodKey) { if (job.vodId) j.vodId = job.vodId; if (job.title) j.title = job.title; }
+        if (job.saved.size) noteVodTotals(job);
+      }
       const prev = job.position;
       job.position = m.t;
       clearTimeout(job.positionTimer);

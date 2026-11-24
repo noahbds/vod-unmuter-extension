@@ -79,6 +79,7 @@ export async function goneTx(mode, work) {
 
 // ---- compression ------------------------------------------------------
 // A saved segment is one of:
+//   { fmt: 'adts', type, pts, data, packed }     ADTS frames (no TS/PES headers), lossless
 //   { fmt: 'deflate', type, pts, data, packed }  audio packets, lossless
 //   { fmt: 'aac', type, pts, kbps, data }        sound re-encoded to AAC
 //                                                (ADTS frames), smaller

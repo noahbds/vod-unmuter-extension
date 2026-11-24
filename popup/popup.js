@@ -1,5 +1,5 @@
 const api = globalThis.browser || globalThis.chrome;
-const DEFAULTS = { enabled: true, badge: true, recolor: true, saveAudio: true, saveMode: 'whole', keepDays: 60, saveQuality: 'high', maxStorageMB: 1000, autoOpenTab: true, debug: false, notify: false };
+const DEFAULTS = { enabled: true, badge: true, recolor: true, saveAudio: true, saveMode: 'whole', keepDays: 60, saveQuality: 'high', maxStorageMB: 1000, autoOpenTab: true, debug: false, notify: false, skipMuted: false };
 const NUMBERS = ['keepDays', 'maxStorageMB'];
 const TWITCH_TABS = ['https://www.twitch.tv/*', 'https://m.twitch.tv/*'];
 const $ = (id) => document.getElementById(id);
@@ -144,7 +144,8 @@ function vodLines(v) {
     if (before > 0) why.push(`${before} deleted by Twitch before saving`);
     if (notYet > 0) why.push(`${notYet} not saved yet`);
   }
-  return { main, why: why.join(' · ') };
+  const url = v.vodId ? `https://www.twitch.tv/videos/${encodeURIComponent(v.vodId)}` : null;
+  return { main, why: why.join(' · '), title: v.title || '', url };
 }
 
 function render(reply) {
@@ -196,9 +197,13 @@ function render(reply) {
     const bytes = list.reduce((n, v) => n + v.bytes, 0);
     const body = el('div', { class: 'body' });
     for (const v of list) {
-      const { main, why } = vodLines(v);
+      const { main, why, title, url } = vodLines(v);
+      const link = url ? el('a', { class: 'vod-link', href: url, target: '_blank', rel: 'noopener', title: title ? `Open "${title}" on Twitch` : 'Open this VOD on Twitch' }, ' ↗') : null;
       body.append(el('div', { class: 'item' + (v.pinned ? ' pinned' : '') },
-        el('div', { class: 'grow' }, el('div', null, main, v.pinned ? ' · 📌' : ''), why ? el('small', null, why) : null),
+        el('div', { class: 'grow' },
+          title ? el('div', { class: 'vod-title', title }, title) : null,
+          el('div', null, main, v.pinned ? ' · 📌' : '', link),
+          why ? el('small', null, why) : null),
         readOnly ? null : el('span', { class: 'buttons' },
           el('button', {
             type: 'button', class: 'icon', title: v.pinned ? 'Unpin: allow automatic deletion again' : 'Pin: never delete it automatically',
@@ -322,25 +327,11 @@ async function renderChannels() {
   $('autoNote').textContent = autoState.note || '';
 }
 
-$('addChannel').addEventListener('submit', async (e) => {
-  e.preventDefault();
-  const err = $('channelError');
-  err.hidden = true;
-  // Accept "name", "@name" or a twitch.tv link.
-  const raw = $('channelInput').value.trim();
-  const login = (raw.match(/twitch\.tv\/([A-Za-z0-9_]+)/) || [null, raw.replace(/^@/, '')])[1].toLowerCase();
-  if (!/^[a-z0-9_]{2,25}$/.test(login)) { err.textContent = 'That doesn\'t look like a Twitch channel name.'; err.hidden = false; return; }
-  try {
-    const r = await fetch('https://gql.twitch.tv/gql', {
-      method: 'POST', headers: { 'Client-ID': 'kimne78kx3ncx6brgo4mv6wki5h1ko' },
-      body: JSON.stringify({ query: `query { user(login: ${JSON.stringify(login)}) { login } }` }),
-    }).then((x) => x.json());
-    if (!r.data || !r.data.user) { err.textContent = `No Twitch channel called "${login}".`; err.hidden = false; return; }
-  } catch (x) { /* offline: add it anyway */ }
-  const { autoChannels } = await api.storage.sync.get({ autoChannels: [] });
-  if (!autoChannels.includes(login)) await api.storage.sync.set({ autoChannels: autoChannels.concat(login) });
-  $('channelInput').value = '';
-  api.runtime.sendMessage({ vu: 'autoCheckNow' }).catch(() => {});
+bindChannelForm({
+  api,
+  form: $('addChannel'),
+  input: $('channelInput'),
+  error: $('channelError'),
 });
 
 $('checkNow').addEventListener('click', async () => {

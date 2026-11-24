@@ -173,14 +173,18 @@ async function check(force) {
 
   const { autoBusyUntil } = await session.get({ autoBusyUntil: 0 });
   if (autoBusyUntil > Date.now()) {
-    log('info', `auto-save: skipped, the previous run is still going (given up at ${new Date(autoBusyUntil).toLocaleTimeString()} if it never reports back)`);
-    return { ok: false, busy: true };
+    if (force) await session.set({ autoQueued: true });
+    log('info', `auto-save: skipped, the previous run is still going (given up at ${new Date(autoBusyUntil).toLocaleTimeString()} if it never reports back)${force ? '; queued a follow-up check right after it finishes' : ''}`);
+    return { ok: false, busy: true, queued: !!force };
   }
+  await session.set({ autoQueued: false });
   log('info', `auto-save run (${force ? 'asked now' : `every ${EVERY_MINUTES} min`}): looking at ${settings.autoChannels.length} channel(s): ${settings.autoChannels.join(', ')}`);
 
   let work = [];
+  const titles = {};
   await updateState(async (state) => {
     work = await findWork(settings.autoChannels, state, force);
+    for (const id of work) if (state.vods[id] && state.vods[id].title) titles[id] = state.vods[id].title;
     state.lastRun = Date.now();
     state.note = '';
   });
@@ -196,7 +200,7 @@ async function check(force) {
     (picked.opened ? `a background tab opened for it (tab ${picked.tab.id}, twitch.tv/robots.txt, closed when done)` : `an open Twitch tab (tab ${picked.tab.id}, ${picked.tab.active ? 'the one you are looking at' : 'not the one you are looking at'})`));
   await updateState((state) => { for (const id of work) if (state.vods[id]) state.vods[id].running = true; });
   await session.set({ autoBusyUntil: Date.now() + BUSY_MINUTES * 6e4 });
-  const reply = await send(picked.tab.id, { vu: 'autosave', vodIds: work });
+  const reply = await send(picked.tab.id, { vu: 'autosave', vodIds: work, titles });
   if (!reply || !reply.accepted) {
     log('warn', `auto-save: tab ${picked.tab.id} ${reply && reply.busy ? 'is still busy with an earlier run' : 'did not answer for 10 s (its page may not have loaded)'}: tried again next run`);
     await session.set({ autoBusyUntil: 0 });
@@ -307,13 +311,19 @@ function recordResult(result) {
 }
 
 async function finished(sender) {
-  await session.set({ autoBusyUntil: 0 });
+  const { autoQueued } = await session.get({ autoQueued: false });
+  await session.set({ autoBusyUntil: 0, autoQueued: false });
+  if (autoQueued) {
+    log('info', 'auto-save run finished; running the queued follow-up check now');
+    const res = await check(true);
+    if (res && res.work > 0) return;
+  }
   const { autoTab } = await session.get({ autoTab: null });
-  if (sender.tab && sender.tab.id === autoTab) {
+  if (sender && sender.tab && sender.tab.id === autoTab) {
     await api.tabs.remove(autoTab).catch(() => {});
     await session.set({ autoTab: null });
   }
-  log('info', `auto-save run finished${sender.tab && sender.tab.id === autoTab ? '; closed the background tab' : ''}`);
+  log('info', `auto-save run finished${sender && sender.tab && sender.tab.id === autoTab ? '; closed the background tab' : ''}`);
 }
 
 api.runtime.onMessage.addListener((msg, sender, sendResponse) => {

@@ -22,6 +22,11 @@ export async function recordToAudio(rec) {
   if (!rec) return null;
   if (!rec.fmt) return { type: rec.type, pts: rec.pts, packets: rec.packets };
   if (rec.fmt === 'deflate') return { type: rec.type, pts: rec.pts, packets: rec.packed ? await inflate(rec.data) : rec.data };
+  if (rec.fmt === 'adts') {
+    const bytes = rec.packed ? await inflate(rec.data) : rec.data;
+    const frames = splitAdts(bytes);
+    return frames.length ? { type: 0x0f, pts: rec.pts, packets: muxAdts(frames, rec.pts, adtsInfo(frames[0]).sampleRate) } : null;
+  }
   if (rec.fmt === 'aac') {
     const frames = splitAdts(rec.data);
     return frames.length ? { type: 0x0f, pts: rec.pts, packets: muxAdts(frames, rec.pts, adtsInfo(frames[0]).sampleRate) } : null;

@@ -29,7 +29,7 @@ export function startPageBridge() {
     }
     if (request.action === 'autosave') {
       const auto = window.__vodUnmuterAuto;
-      return auto ? auto.save(request.vodId) : { vodId: request.vodId, ok: false, error: 'unavailable' };
+      return auto ? auto.save(request.vodId, request.title) : { vodId: request.vodId, ok: false, error: 'unavailable' };
     }
     if (request.action === 'delete' && request.vodKey) await forget(request.vodKey);
     else if (request.action === 'deleteAll') for (const v of await store.list()) await forget(v.vod);

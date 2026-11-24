@@ -1,7 +1,7 @@
 // Hook module (page and player worker): see src/hook.js.
 
 import { jobName, MUTED_RE } from '../shared/constants.js';
-import { INSTANCE, IS_PAGE, ORIGIN, playlists, post, realFetch, renditions, RESTRICTED, segments, settings } from '../shared/state.js';
+import { INSTANCE, IS_PAGE, ORIGIN, playlists, post, realFetch, renditions, RESTRICTED, segments, settings, vodIdsByBase } from '../shared/state.js';
 import { log } from '../shared/logger.js';
 import { currentJob, forgetCurrent, jobs, scheduleResult, sendState, switchVod } from '../recovery/recovery-state.js';
 import { checkAll, checkMore } from '../recovery/scan-scheduler.js';
@@ -9,6 +9,7 @@ import { checkAll, checkMore } from '../recovery/scan-scheduler.js';
 // ------------------------------------------------------------ playlists
 export function readMaster(text, masterUrl) {
   const byVod = new Map();
+  const idMatch = String(masterUrl || '').match(/\/vod\/(\d+)\.m3u8/);
   for (const raw of text.split('\n')) {
     const line = raw.trim();
     if (!line || line[0] === '#') continue;
@@ -22,7 +23,10 @@ export function readMaster(text, masterUrl) {
       if (!byVod.get(vodBase).includes(dir)) byVod.get(vodBase).push(dir);
     } catch (e) { /* ignore */ }
   }
-  for (const [vodBase, dirs] of byVod) renditions.set(vodBase, dirs);
+  for (const [vodBase, dirs] of byVod) {
+    renditions.set(vodBase, dirs);
+    if (idMatch) vodIdsByBase.set(vodBase, idMatch[1]);
+  }
 }
 
 // `existing`: the job made from an earlier copy of this playlist. A VOD that
@@ -36,11 +40,14 @@ export function rewritePlaylist(text, playlistUrl, auto, existing) {
     key: base,                                      // one per quality
     vod: vodBase,                                   // same for every quality
     vodKey,                                         // folder name, used for saving
+    vodId: vodIdsByBase.get(vodBase) || null,       // Twitch VOD id, when known
+    title: '',
     dir: base.slice(vodBase.length, -1),
     base, vodBase, total: 0, segs: [], done: 0, found: 0, finished: false,
     saved: new Set(), savedBytes: 0, savedAt: null, saving: false, savedAll: false, noSave: false,
     limitReached: false, compressing: false, compressDone: 0, compressTotal: 0,
   };
+  if (!job.vodId && vodIdsByBase.has(vodBase)) job.vodId = vodIdsByBase.get(vodBase);
   // Still recording: no end marker yet. Its newest files may not be in
   // every quality yet, so "not found" isn't remembered for good.
   job.live = !text.includes('#EXT-X-ENDLIST');
@@ -105,7 +112,7 @@ export function rewritePlaylist(text, playlistUrl, auto, existing) {
   }
   // Another quality of this VOD may already know its saved size.
   const sibling = jobs.find((j) => j.vodKey === vodKey);
-  if (sibling) Object.assign(job, { savedBytes: sibling.savedBytes, savedAt: sibling.savedAt, noSave: sibling.noSave });
+  if (sibling) Object.assign(job, { savedBytes: sibling.savedBytes, savedAt: sibling.savedAt, noSave: sibling.noSave, vodId: job.vodId || sibling.vodId || null, title: job.title || sibling.title || '' });
   job.auto = !!auto;
   // Another quality of this VOD is already being played (the player loads
   // several playlists when it adapts quality): wait until this one is.

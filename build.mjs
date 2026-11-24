@@ -30,6 +30,7 @@ const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const DIST = path.join(ROOT, 'dist');
 const FILES = ['src', 'popup', 'icons', 'LICENSE']; // everything the extension needs
 const HOOK = 'src/hook.js';
+const UI = 'src/ui.js';
 // Modules that only the page uses: in src/hook.js they sit outside
 // installUnmuteHook, or between the page-only markers (cut out of the copy
 // sent to the player worker).
@@ -52,9 +53,11 @@ function listFiles(dir) {
   return out;
 }
 
-// The hook's modules (src/<folder>/<file>.js) are not copied: they are inside
-// src/hook.js.
-const isHookModule = (rel) => rel.startsWith('src/') && rel.split('/').length > 2;
+// The hook's and UI's modules (src/<folder>/<file>.js) are not copied on their
+// own: they are assembled into src/hook.js and src/ui.js.
+const isUiModule = (rel) => rel.startsWith('src/ui/') && rel.split('/').length > 2;
+const isHookModule = (rel) => rel.startsWith('src/') && rel.split('/').length > 2 && !isUiModule(rel);
+const isSubModule = (rel) => isHookModule(rel) || isUiModule(rel);
 
 function sourceFiles() {
   const files = [];
@@ -67,12 +70,13 @@ function sourceFiles() {
   return files;
 }
 
-function copyInto(target, hookCode) {
+function copyInto(target, hookCode, uiCode) {
   const files = [];
   for (const rel of sourceFiles()) {
-    if (isHookModule(rel)) continue;
+    if (isSubModule(rel)) continue;
     fs.mkdirSync(path.dirname(path.join(target, rel)), { recursive: true });
     if (rel === HOOK) fs.writeFileSync(path.join(target, rel), hookCode);
+    else if (rel === UI) fs.writeFileSync(path.join(target, rel), uiCode);
     else fs.copyFileSync(path.join(ROOT, rel), path.join(target, rel));
     files.push(rel);
   }
@@ -339,6 +343,60 @@ export function assembleHook() {
   return { code, modules: [...mods.values()] };
 }
 
+// Builds dist's src/ui.js from the template and its src/ui/*.js modules, after
+// checking that imports, top-level declarations and assignments fit together.
+export function assembleUi() {
+  const template = readText(UI);
+  const problems = [];
+  const includes = [];
+  for (const line of template.split('\n')) {
+    const m = line.match(/^\s*\/\/ @include (\S+)$/);
+    if (m) includes.push(m[1]);
+  }
+  const mods = new Map();
+  for (const rel of includes) {
+    if (mods.has(rel)) { problems.push(`${UI}: ${rel} is included twice`); continue; }
+    mods.set(rel, readModule(rel));
+  }
+  for (const rel of sourceFiles().filter(isUiModule).map((f) => f.slice(4))) {
+    if (rel.endsWith('.js') && !mods.has(rel)) problems.push(`src/${rel} is not included by ${UI}`);
+  }
+  const owner = new Map();
+  for (const m of mods.values()) {
+    for (const d of m.decls) {
+      if (owner.has(d)) problems.push(`"${d}" is declared in both ${owner.get(d).file} and ${m.file}`);
+      else owner.set(d, m);
+    }
+  }
+  for (const m of mods.values()) {
+    const imported = new Set();
+    for (const imp of m.imports) {
+      const from = mods.get(imp.from);
+      if (!from) { problems.push(`${m.file}: imports from ${imp.from}, which isn't a module of ${UI}`); continue; }
+      for (const name of imp.names) {
+        imported.add(name);
+        if (!from.decls.includes(name)) problems.push(`${m.file}: imports "${name}", which ${from.file} doesn't declare`);
+      }
+    }
+    for (const name of usedNames(m.ids)) {
+      const o = owner.get(name);
+      if (o && o !== m && !imported.has(name)) problems.push(`${m.file}: uses "${name}" from ${o.file} without importing it`);
+    }
+    for (const name of assignedNames(m.ids)) {
+      if (imported.has(name)) problems.push(`${m.file}: assigns "${name}", which belongs to ${owner.get(name).file} (change it there)`);
+    }
+  }
+  if (problems.length) throw new Error(problems.join('\n'));
+
+  const code = template.split('\n').map((line) => {
+    const m = line.match(/^(\s*)\/\/ @include (\S+)$/);
+    if (!m) return line;
+    const mod = mods.get(m[2]);
+    return [`${m[1]}// ---- src/${mod.rel} ----`].concat(mod.body.split('\n').map((l) => (l ? m[1] + l : l))).join('\n');
+  }).join('\n');
+  return { code, modules: [...mods.values()] };
+}
+
 // ---------------------------------------------------------------- sandbox
 // Runs the built hook in fake page and player-worker globals that have only
 // standard JavaScript plus the web APIs listed here: if the worker's copy used
@@ -464,21 +522,69 @@ function checkSources() {
   return base;
 }
 
+// Boots the built src/ui.js in a minimal fake page context.
+export async function uiSandboxCheck(uiCode) {
+  const fail = (msg) => { throw new Error('ui sandbox: ' + msg); };
+  const page = makeSandbox('page');
+  class FakeNode {
+    constructor(tag) { this.tagName = String(tag || '').toUpperCase(); this.children = []; this.style = { setProperty() {} }; this.attrs = {}; this.classList = { toggle() {}, add() {}, remove() {} }; }
+    setAttribute(k, v) { this.attrs[k] = String(v); }
+    getAttribute(k) { return this.attrs[k] ?? null; }
+    addEventListener() {}
+    append(...nodes) { this.children.push(...nodes); }
+    replaceChildren(...nodes) { this.children = [...nodes]; }
+    querySelector() { return null; }
+    querySelectorAll() { return []; }
+    remove() {}
+    contains() { return false; }
+  }
+  Object.assign(page.global, {
+    Node: FakeNode,
+    setInterval: () => 0,
+    clearInterval: () => {},
+    requestAnimationFrame: () => 0,
+    getComputedStyle: () => ({ direction: 'ltr' }),
+    location: { origin: 'https://www.twitch.tv', hostname: 'www.twitch.tv', pathname: '/videos/1', search: '', hash: '', href: 'https://www.twitch.tv/videos/1' },
+    navigator: { userAgent: 'Mozilla/5.0 Chrome/140.0' },
+    document: {
+      cookie: '', title: 'Stream - Twitch', readyState: 'complete',
+      head: new FakeNode('head'), body: new FakeNode('body'), documentElement: new FakeNode('html'),
+      createElement: (t) => new FakeNode(t),
+      createElementNS: (_, t) => new FakeNode(t),
+      createTextNode: (t) => new FakeNode('#text:' + t),
+      querySelector: () => null,
+      querySelectorAll: () => [],
+      addEventListener() {},
+    },
+  });
+  page.run(uiCode, 'dist/src/ui.js');
+  if (!page.global.__vodUnmuterUI) fail('__vodUnmuterUI was not set');
+  if (typeof page.global.__vodUnmuterDiag !== 'function') fail('__vodUnmuterDiag was not exposed');
+  if (!page.rec.posted.some((m) => m.type === 'hello')) fail('ui.js did not say hello on the channel');
+  const problems = page.rec.console.filter((l) => /^(warn|error)$/.test(l.level));
+  if (problems.length) fail('console: ' + problems.map((l) => l.text).join(' | '));
+  return page;
+}
+
 // Every script the extension loads must at least parse.
-function checkSyntax(files, hookCode) {
+function checkSyntax(files, hookCode, uiCode) {
   for (const rel of files) {
     if (!rel.endsWith('.js')) continue;
-    try { new vm.Script(rel === HOOK ? hookCode : readText(rel), { filename: rel }); } catch (e) { throw new Error(`${rel}: ${e.message}`); }
+    const code = rel === HOOK ? hookCode : rel === UI ? uiCode : readText(rel);
+    try { new vm.Script(code, { filename: rel }); } catch (e) { throw new Error(`${rel}: ${e.message}`); }
   }
 }
 
 // ---------------------------------------------------------------- build
 async function main() {
   const base = checkSources();
-  const { code: hookCode, modules } = assembleHook();
-  checkSyntax(sourceFiles().filter((f) => !isHookModule(f)), hookCode);
+  const { code: hookCode, modules: hookModules } = assembleHook();
+  const { code: uiCode, modules: uiModules } = assembleUi();
+  checkSyntax(sourceFiles().filter((f) => !isSubModule(f)), hookCode, uiCode);
   await sandboxCheck(hookCode);
-  console.log(`hook     ${HOOK} from ${modules.length} modules: checked (imports, page-only parts, page + worker sandbox)`);
+  await uiSandboxCheck(uiCode);
+  console.log(`hook     ${HOOK} from ${hookModules.length} modules: checked (imports, page-only parts, page + worker sandbox)`);
+  console.log(`ui       ${UI} from ${uiModules.length} modules: checked (imports, page sandbox)`);
 
   const manifests = {
     chrome() {
@@ -496,7 +602,7 @@ async function main() {
   fs.rmSync(DIST, { recursive: true, force: true });
   for (const [browser, makeManifest] of Object.entries(manifests)) {
     const dir = path.join(DIST, browser);
-    const files = copyInto(dir, hookCode);
+    const files = copyInto(dir, hookCode, uiCode);
     fs.writeFileSync(path.join(dir, 'manifest.json'), JSON.stringify(makeManifest(), null, 2) + '\n');
     files.push('manifest.json');
     const zipName = `twitch-vod-unmuter-${browser}-${base.version}.zip`;

@@ -23,7 +23,7 @@ try { ORIGIN = scope.location.origin; } catch (e) { /* ignore */ }
 export const RESTRICTED = /^https:\/\/(player|m)\.twitch\.tv$/.test(ORIGIN);
 
 export const realFetch = scope.fetch;
-export let settings = { enabled: true, saveAudio: true, saveMode: 'whole', keepDays: 60, saveQuality: 'high', maxStorageMB: 1000, debug: false };
+export let settings = { enabled: true, saveAudio: true, saveMode: 'whole', keepDays: 60, saveQuality: 'high', maxStorageMB: 1000, debug: false, skipMuted: false };
 // "whole": save every muted part. "unplayed": save the parts not watched
 // yet, and drop a part's saved copy once it has been watched through.
 // (Older versions had "watched"; it now means "unplayed".)
@@ -47,3 +47,4 @@ export const pending = new Map();     // file URL -> Promise<boolean>
 export const segments = new Map();    // rewritten segment URL -> muted segment record
 export const playlists = new Map();   // playlist URL -> { text, job }
 export const renditions = new Map();  // VOD folder URL -> quality dirs, best first
+export const vodIdsByBase = new Map(); // VOD folder URL -> Twitch VOD id

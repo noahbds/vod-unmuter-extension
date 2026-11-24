@@ -47,8 +47,8 @@ This creates, in `dist/`:
 |---|---|
 | `dist/chrome/` | Chrome, Edge, Brave, Opera: *Load unpacked* |
 | `dist/firefox/` | Firefox: *Load Temporary Add-on* |
-| `twitch-vod-unmuter-chrome-1.4.0.zip` | Upload to the Chrome Web Store |
-| `twitch-vod-unmuter-firefox-1.4.0.zip` | Upload to addons.mozilla.org (signing) |
+| `twitch-vod-unmuter-chrome-1.5.0.zip` | Upload to the Chrome Web Store |
+| `twitch-vod-unmuter-firefox-1.5.0.zip` | Upload to addons.mozilla.org (signing) |
 
 The two builds differ only in `manifest.json` (Chrome runs the background
 script as a service worker, Firefox as a background page).
@@ -128,7 +128,8 @@ Hover the counter (or click it to keep it open) for:
 - the quality you're watching and how many parts were unmuted,
 - how many used another quality or your saved copy,
 - the **saved on this computer** status, with a button to delete it,
-- the list of every muted part of the VOD.
+- the list of every muted part of the VOD (click any part to jump the player
+  to it; press `Escape` to close the panel).
 
 **Seek bar:** Twitch's red marks are replaced by **green** (sound restored),
 **red** (still muted) and **yellow** (not checked yet: network problem,
@@ -154,6 +155,7 @@ Click the extension's icon in the toolbar.
 | **Restore muted audio** | On | The main switch. Takes effect when the VOD is reloaded |
 | **Counter in the player** | On | The counter next to ⚙️ |
 | **Green seek bar** | On | Recolors muted parts and shows details on hover |
+| **Skip parts that stay muted** | Off | Automatically jumps the player past muted parts whose sound Twitch already deleted |
 | **Save audio for later** | On | Keeps the sound of muted parts on this computer (see below) |
 | **What to save** | Whole VOD | *Whole VOD*: every part that can still be unmuted, in the background. *Parts ahead of me*: only parts ahead of where you are. Nothing behind the player's position is downloaded (saving starts from it, nearest first). Once you've played 20 s at a position, saved copies of every part before it (watched or skipped) are removed; your furthest position is remembered per VOD |
 | **Saved quality** | High | *Original*: lossless. *High*: 96 kbps. *Small*: 64 kbps. See [compression](#compression) |
@@ -549,10 +551,14 @@ src/hook.js            Runs in the page and in the player's worker. A template:
   player/              playlist and segment requests, channel messages,
                        getting the hook into the player's worker
   messaging/           the page's side of bridge.js
-src/ui.js              Counter, panel, seek bar colors, hover details
+src/ui.js              Counter, panel, seek bar colors, hover details, backup
+                       page. A template put together from:
+  ui/                  dom, state, backup-page, diagnostics, explanations,
+                       panel, seekbar
 src/bridge.js          Passes settings, popup and auto-save requests to the page
 src/background.js      Auto-save timer: finds recent VODs, picks a Twitch tab
-popup/                 Settings and saved-audio manager
+popup/                 Settings, saved-audio manager, first-run page, shared
+                       channel input helper (channel-form.js)
 icons/                 Extension icons (16, 32, 48, 128 px)
 art/                   Logo sources (SVG), 512 px logo, store images (1280x800,
                        440x280); original-*: alternative logo without Twitch's shape

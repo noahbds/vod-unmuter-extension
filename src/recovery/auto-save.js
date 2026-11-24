@@ -6,13 +6,13 @@ import { jobs } from './recovery-state.js';
 import { compressJob, maybeSaveAll } from './save-compress-jobs.js';
 import { readMaster, rewritePlaylist } from '../player/playlist-handler.js';
 
-if (IS_PAGE) scope.__vodUnmuterAuto = { save: (vodId) => autoSave(vodId) };
+if (IS_PAGE) scope.__vodUnmuterAuto = { save: (vodId, title) => autoSave(vodId, title) };
 
 // ------------------------------------------------------------ auto-save
 // Saves a VOD's muted parts without playing it (for the channels in the
 // popup's auto-save list). Runs in a twitch.tv page, because that's where
 // saved audio lives and where the viewer is logged in.
-export async function autoSave(vodId) {
+export async function autoSave(vodId, title) {
   const out = { vodId: String(vodId), ok: false };
   let job = null;
   try {
@@ -48,6 +48,8 @@ export async function autoSave(vodId) {
     if (!out.muted) { out.ok = true; out.restorable = 0; out.saved = 0; return out; }
 
     job = rewritePlaylist(text, mediaUrl, true).job;
+    job.vodId = String(vodId);
+    if (title) job.title = String(title);
     out.vodKey = job.vodKey;
     await job.checked;
     await maybeSaveAll(job, true);

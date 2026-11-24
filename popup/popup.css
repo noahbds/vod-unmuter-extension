@@ -121,6 +121,9 @@ button.link { border: 0; background: none; padding: 0; color: var(--danger); fon
 .item:first-child { border-top: 0; }
 .item .grow { flex: 1; min-width: 0; }
 .item .title { font-weight: 600; }
+.item .vod-title { font-weight: 600; font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.item .vod-link { color: var(--saved); text-decoration: none; font-weight: 600; }
+.item .vod-link:hover { text-decoration: underline; }
 .item small { display: block; color: var(--muted); font-size: 11.5px; line-height: 1.35; }
 .item .buttons { display: flex; gap: 3px; flex: none; }
 

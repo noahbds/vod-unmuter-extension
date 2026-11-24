@@ -11,14 +11,18 @@ import { describe, isCurrent, jobs, sendResult, sendState, throttledProgress } f
 import { dropBehind, maybeSaveAll, scheduleCompress } from './save-compress-jobs.js';
 
 // Once a VOD is checked, its saved record learns how much of it was muted
-// and could be restored, so the menu can say "182 / 204 saved" and why.
+// and could be restored (plus its Twitch id and title when known), so the menu
+// can say "182 / 204 saved", why, and link to the VOD.
 export function noteVodTotals(job) {
   if (job.skipped && !job.saved.size) return;
-  updateVodInfo(job.vodKey, {
+  const fields = {
     muted: job.segs.length,
     restorable: job.segs.filter((x) => x.source).length,
     checkedAt: Date.now(),
-  });
+  };
+  if (job.vodId) fields.vodId = job.vodId;
+  if (job.title) fields.title = job.title;
+  updateVodInfo(job.vodKey, fields);
 }
 
 // A small pool of workers, each finishing one segment before taking the next.

@@ -6,7 +6,7 @@
 (() => {
   'use strict';
   const api = globalThis.browser || globalThis.chrome;
-  const DEFAULTS = { enabled: true, badge: true, recolor: true, saveAudio: true, saveMode: 'whole', keepDays: 60, saveQuality: 'high', maxStorageMB: 1000, debug: false, autoChannels: [] };
+  const DEFAULTS = { enabled: true, badge: true, recolor: true, saveAudio: true, saveMode: 'whole', keepDays: 60, saveQuality: 'high', maxStorageMB: 1000, debug: false, skipMuted: false, autoChannels: [] };
 
   async function send() {
     let settings = DEFAULTS;
@@ -29,6 +29,7 @@
     if (ev.source !== window || !ev.data || ev.data.source !== 'vod-unmuter-page') return;
     if (ev.data.type === 'getSettings') send();
     if (ev.data.type === 'addAutoChannel' && typeof ev.data.login === 'string') addAutoChannel(ev.data.login.toLowerCase());
+    if (ev.data.type === 'refreshSavedCache' && window === window.top) askPage({ action: 'list' }, 8000).then(cacheList);
   });
   api.storage.onChanged.addListener((changes, area) => { if (area === 'sync') send(); });
   send();
@@ -58,7 +59,7 @@
   // show it even when no Twitch tab is open (the audio itself stays here).
   function cacheList(reply) {
     if (!reply || !Array.isArray(reply.vods) || location.hostname !== 'www.twitch.tv') return;
-    const vods = reply.vods.map((v) => ({ vod: v.vod, channel: v.channel, streamedAt: v.streamedAt, savedAt: v.savedAt,
+    const vods = reply.vods.map((v) => ({ vod: v.vod, vodId: v.vodId || null, title: v.title || '', channel: v.channel, streamedAt: v.streamedAt, savedAt: v.savedAt,
       segments: v.segments, bytes: v.bytes, muted: v.muted, restorable: v.restorable, pinned: !!v.pinned }));
     api.storage.local.set({ savedCache: { at: Date.now(), vods, quota: reply.quota || null } }).catch(() => {});
   }
@@ -85,7 +86,8 @@
         `auto-save asked by the extension: ${(msg.vodIds || []).length} VOD(s) to save in this tab, one at a time (${(msg.vodIds || []).join(', ')})`);
       (async () => {
         for (const vodId of msg.vodIds || []) {
-          const result = await askPage({ action: 'autosave', vodId }, 30 * 60 * 1000);
+          const title = (msg.titles && msg.titles[vodId]) || '';
+          const result = await askPage({ action: 'autosave', vodId, title }, 30 * 60 * 1000);
           try { await api.runtime.sendMessage({ vu: 'autosaveDone', result: Object.assign({ vodId }, result) }); } catch (e) { /* background asleep */ }
         }
         autoBusy = false;

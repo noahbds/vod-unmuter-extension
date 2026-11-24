@@ -62,6 +62,20 @@ export function storageFullFor(vod) {
   for (const j of jobs) if (j.vodKey === vod) { j.limitReached = true; j.storageFull = true; scheduleResult(j); }
 }
 
+// Strips MPEG-TS and PES packet headers/stuffing when the audio is ADTS AAC
+// (type 0x0f), then deflates it. Bit-exact lossless and ~10-15% smaller.
+export async function packLossless(audio) {
+  if (audio.type === 0x0f) {
+    const es = packetsToAdts(audio.packets);
+    if (splitAdts(es).length) {
+      const packed = await deflate(es);
+      return { fmt: 'adts', type: 0x0f, pts: audio.pts, data: packed.data, packed: packed.packed };
+    }
+  }
+  const packed = await deflate(audio.packets);
+  return { fmt: 'deflate', type: audio.type, pts: audio.pts, data: packed.data, packed: packed.packed };
+}
+
 export async function saveFromBytes(seg, bytes) {
   const job = seg.job;
   if (!settings.saveAudio || job.noSave || job.limitReached || job.saved.has(seg.num)) return;
@@ -69,13 +83,13 @@ export async function saveFromBytes(seg, bytes) {
   if (!audio) return;
   const info = await serially(async () => {
     if (job.limitReached || job.saved.has(seg.num)) return null;
-    const packed = await deflate(audio.packets);
-    if (!(await makeRoom(job, packed.data.byteLength))) {
+    const rec = await packLossless(audio);
+    if (!(await makeRoom(job, recBytes(rec)))) {
       job.limitReached = true;
       scheduleResult(job);
       return null;
     }
-    return putRecord(job.vodKey, seg.num, { fmt: 'deflate', type: audio.type, pts: audio.pts, data: packed.data, packed: packed.packed }, false, storageFullFor);
+    return putRecord(job.vodKey, seg.num, rec, false, storageFullFor);
   });
   if (!info) return;
   for (const j of jobs) if (j.vodKey === job.vodKey) j.saved.add(seg.num);
@@ -231,14 +245,14 @@ export async function runCompress(job) {
           cache.frames = frames;
         }
       }
-      // Lossless fallback (or "Original" quality): only old uncompressed saves change.
-      if (!next && !rec.fmt) {
-        const packed = await deflate(rec.packets);
-        next = { fmt: 'deflate', type: rec.type, pts: rec.pts, data: packed.data, packed: packed.packed };
+      // Lossless fallback (or "Original" quality): upgrade older TS-packet or
+      // uncompressed saves to stripped ADTS + deflate when smaller.
+      if (!next && rec.fmt !== 'adts') {
+        next = await packLossless(audio);
       }
       if (next && recBytes(next) < recBytes(rec)) {
         freed += recBytes(rec) - recBytes(next);
-        count[next.fmt]++;
+        count[next.fmt === 'adts' ? 'deflate' : next.fmt]++;
         noteSaved(job, await putRecord(job.vodKey, num, next, true, storageFullFor));
       } else count.kept++;
     }

@@ -1,6 +1,6 @@
 {
   "name": "twitch-vod-unmuter",
-  "version": "1.4.0",
+  "version": "1.5.0",
   "private": true,
   "description": "Browser extension (Chrome and Firefox) that restores the sound in muted parts of Twitch VODs",
   "license": "MIT",
@@ -13,7 +13,7 @@
     "lint": "node build.mjs && web-ext lint",
     "start:firefox": "node build.mjs && web-ext run",
     "start:chrome": "node build.mjs && web-ext run --target chromium --source-dir dist/chrome",
-    "test:unit": "npm --prefix test run test:unit",
+    "test:unit": "node --test test/unit/*.test.mjs",
     "test": "npm --prefix test test",
     "check-twitch": "npm --prefix test run check-twitch",
     "check-version": "node -e \"const m=require('./manifest.json'),p=require('./package.json');if(m.version!==p.version){console.error('manifest.json is '+m.version+', package.json is '+p.version);process.exit(1)}\""

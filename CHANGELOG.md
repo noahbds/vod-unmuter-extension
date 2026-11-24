@@ -1,5 +1,57 @@
 # Changelog
 
+## 1.5.0 (in progress: not released yet)
+
+In the player:
+- **Click any muted part in the panel to jump to it.** Each line under *Muted
+  parts of this VOD* (`40:20 – 40:30`) now seeks the video to that moment
+  (also works with the keyboard: `Tab`, then `Enter` or `Space`).
+- **Skip parts that stay muted** (off by default, under *In the player* in the
+  menu). When a VOD has muted stretches whose sound Twitch already deleted,
+  the player jumps straight past them (`r.start` → `r.end`). Parts still being
+  checked or waiting for a network retry are not skipped, and clicking a muted
+  part in the panel lets you watch it without being jumped away.
+- **Keyboard and screen-reader access:** the counter button sets
+  `aria-expanded`, pressing `Escape` closes the open panel and returns focus
+  to the button, and the panel's list is reachable with `Tab`.
+
+Saved audio, backups and auto-save:
+- **VOD title and direct link in the saved list.** Saved VODs now remember
+  their Twitch VOD id and stream title (both when watched and when
+  auto-saved), so the *Saved* tab shows the stream title and a `↗` link to
+  open the VOD on Twitch (even when two streams happened on the same day).
+- **Smaller lossless saves (especially in Firefox).** Lossless saves (`fmt:
+  'adts'`) now strip the 188-byte MPEG-TS packet headers, PES headers and
+  `0xff` adaptation-field stuffing before compressing with deflate, then put
+  the MPEG-TS packets back when played. The AAC frames are bit-for-bit
+  identical, and lossless saves (Firefox, or *Original* quality) are about
+  10–15% smaller. Older lossless saves are upgraded automatically when the VOD
+  is opened.
+- **No duplicate downloads in *"Parts ahead of me"* mode.** When the player
+  downloads a muted part ahead of your position before the background saver
+  gets to it, that download is now saved directly instead of being fetched a
+  second time.
+- **Backup page:** **Select all** and **Select none** buttons when exporting
+  several VODs, stream titles in the list, automatic refresh of the menu's
+  offline saved-VOD cache after importing, and a clear message (keeping what
+  already fit) if browser storage fills up during an import.
+- **Auto-save:** adding a channel or clicking *Check now* while an auto-save
+  run is already going now queues a follow-up check right after it finishes,
+  reusing the background tab instead of waiting for the next 20-minute timer.
+
+Behind the scenes:
+- **`src/ui.js` (958 lines) is split into 7 modules** under `src/ui/`
+  (`dom.js`, `state.js`, `backup-page.js`, `diagnostics.js`,
+  `explanations.js`, `panel.js`, `seekbar.js`), put together and checked by
+  `node build.mjs` (imports, duplicate declarations, cross-module assignments,
+  and a fake-page sandbox check) the same way `src/hook.js` is.
+- **Shared channel input helper** (`popup/channel-form.js`) used by both the
+  menu and the first-run welcome page.
+- **Unit tests in CI:** GitHub Actions (`.github/workflows/build.yml`) now
+  runs the offline unit test suite on every push and pull request, alongside
+  new unit tests covering `src/ui/*`, `fmt: 'adts'` lossless saves,
+  ahead-mode opportunistic saving, backup quota handling, and VOD metadata.
+
 ## 1.4.0 (in progress: not released yet)
 
 Clearer logs, two fixes, and the code reorganized underneath (nothing else
