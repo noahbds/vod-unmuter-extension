@@ -76,10 +76,15 @@ export async function checkAll(job) {
   const started = Date.now();
   job.saved = await loadSavedNums(job.vodKey);
   job.cachedGone = await loadGone(job);
-  // Furthest position reached in this VOD before ("Parts ahead of me").
+  // Furthest position reached in this VOD before ("Parts ahead of me"), and
+  // the size/date of audio already saved on disk for it.
   try {
     const info = (await listSaved(true)).find((v) => v.vod === job.vodKey);
-    if (info && info.behind) job.behind = info.behind;
+    if (info) {
+      if (info.behind) job.behind = info.behind;
+      if (info.bytes) job.savedBytes = info.bytes;
+      if (info.savedAt) job.savedAt = info.savedAt;
+    }
   } catch (e) { /* none */ }
   if (job.behind && saveMode() === 'unplayed' && !job.auto) dropBehind(job, []);
   const info = vodInfo(job.vodKey);

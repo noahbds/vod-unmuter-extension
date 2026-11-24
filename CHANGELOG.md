@@ -6,6 +6,17 @@ In the player:
 - **Click any muted part in the panel to jump to it.** Each line under *Muted
   parts of this VOD* (`40:20 – 40:30`) now seeks the video to that moment
   (also works with the keyboard: `Tab`, then `Enter` or `Space`).
+- **Fix: the checking spinner (`⟳ 29%`) reset every 250 ms.** Each progress
+  update rebuilt the counter button and restarted the 800 ms spin animation at
+  the top (~112° per tick), so it twitched on the right side instead of
+  spinning. The button and its spinner now stay mounted in the DOM while the
+  percentage and panel update in place.
+- **Fix: panel and counter alignment.** The open panel no longer overlaps the
+  seek bar above the control row; values in the top stats table (*Source*,
+  *279*, *0*, *46m 41s / 46m 41s*) align flush right with the muted parts list
+  below; the speaker icon is vertically centered with the counter digits;
+  *Delete saved audio* and *Export to a file* align to the left and right
+  edges; and reopening an already-saved VOD shows its saved size (`· XX MB`).
 - **Skip parts that stay muted** (off by default, under *In the player* in the
   menu). When a VOD has muted stretches whose sound Twitch already deleted,
   the player jumps straight past them (`r.start` → `r.end`). Parts still being

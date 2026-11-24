@@ -27,8 +27,11 @@ export function setPanelPinned(open, returnFocus) {
 export function renderBadge() {
   if (ui.badgeVersion === ui.version || !ui.badge) return;
   ui.badgeVersion = ui.version;
-  ui.badge.replaceChildren();
   const state = ui.state;
+  const prevBtn = ui.badge.querySelector && ui.badge.querySelector('.vu-btn');
+  const prevSpin = prevBtn && prevBtn.querySelector && prevBtn.querySelector('.vu-spin');
+  const prevInner = ui.badge.querySelector && ui.badge.querySelector('.vu-panel-inner');
+  const prevScroll = prevInner ? prevInner.scrollTop : 0;
 
   const toggle = (e) => {
     e.stopPropagation();
@@ -36,7 +39,7 @@ export function renderBadge() {
   };
 
   if (state.type === 'unreachable') {
-    ui.badge.append(h('button', { class: 'vu-btn', 'aria-haspopup': 'true', 'aria-expanded': String(ui.pinned), onclick: toggle,
+    ui.badge.replaceChildren(h('button', { class: 'vu-btn', 'aria-haspopup': 'true', 'aria-expanded': String(ui.pinned), onclick: toggle,
       'aria-label': 'VOD Unmuter is not active on this player' },
       h('span', { class: 'vu-part-c' }, '⚠'), h('span', null, 'Not active')),
     h('div', { class: 'vu-panel', role: 'region', 'aria-label': 'VOD Unmuter details', onclick: (e) => e.stopPropagation() },
@@ -60,7 +63,7 @@ export function renderBadge() {
       window.open(`https://www.twitch.tv/videos/${ui.vodId}${at}`, '_blank', 'noopener');
     };
     const where = /\/\/m\./.test(state.origin || '') ? 'the mobile site' : 'embedded players';
-    ui.badge.append(h('button', { class: 'vu-btn', 'aria-haspopup': 'true', 'aria-expanded': String(ui.pinned), onclick: toggle,
+    ui.badge.replaceChildren(h('button', { class: 'vu-btn', 'aria-haspopup': 'true', 'aria-expanded': String(ui.pinned), onclick: toggle,
       'aria-label': `${state.muted} muted segments: open on twitch.tv to unmute them` },
       h('span', { class: 'vu-part-c' }, speakerIcon(false)), h('span', null, `${state.muted} muted`)),
     h('div', { class: 'vu-panel', role: 'region', 'aria-label': 'VOD Unmuter details', onclick: (e) => e.stopPropagation() },
@@ -83,9 +86,23 @@ export function renderBadge() {
     const done = Math.round(((state.done || 0) / state.muted) * 100);
     const sample = state.sample && state.sample.size && state.sample.done >= state.sample.size ? state.sample : null;
     const looksGone = !!sample && !sample.found;
-    button = h('button', { class: 'vu-btn' + (looksGone ? ' vu-gone' : ''), title: checkingText(state, sample), 'aria-haspopup': 'true', 'aria-expanded': String(ui.pinned), onclick: toggle },
-      looksGone ? h('span', { class: 'vu-no-c' }, speakerIcon(false)) : h('div', { class: 'vu-spin' }),
-      `${done}%`);
+    const title = checkingText(state, sample);
+    if (!looksGone && prevBtn && prevSpin) {
+      // Keep the existing button and .vu-spin mounted in the DOM so the CSS
+      // rotation never resets every 250 ms as progress ticks.
+      prevBtn.className = 'vu-btn';
+      prevBtn.setAttribute('title', title);
+      prevBtn.setAttribute('aria-expanded', String(ui.pinned));
+      let label = prevBtn.querySelector && prevBtn.querySelector('.vu-pct');
+      if (label) label.textContent = `${done}%`;
+      else prevBtn.replaceChildren(prevSpin, h('span', { class: 'vu-pct' }, `${done}%`));
+      button = prevBtn;
+    } else {
+      const spin = h('div', { class: 'vu-spin', style: `animation-delay:-${Date.now() % 800}ms` });
+      button = h('button', { class: 'vu-btn' + (looksGone ? ' vu-gone' : ''), title, 'aria-haspopup': 'true', 'aria-expanded': String(ui.pinned), onclick: toggle },
+        looksGone ? h('span', { class: 'vu-no-c' }, speakerIcon(false)) : spin,
+        h('span', { class: 'vu-pct' }, `${done}%`));
+    }
   } else {
     button = h('button', {
       class: 'vu-btn', 'aria-haspopup': 'true', 'aria-expanded': String(ui.pinned),
@@ -93,49 +110,58 @@ export function renderBadge() {
     }, h('span', { class: cls }, speakerIcon(restored > 0)),
       h('span', null, restored, h('span', { class: 'vu-of' }, ` / ${muted}`)));
   }
-  if (!state.ranges) { ui.badge.append(button); return; }
+  if (!state.ranges) {
+    if (button !== prevBtn) ui.badge.replaceChildren(button);
+    return;
+  }
 
-  const panel = h('div', { class: 'vu-panel', role: 'region', 'aria-label': 'VOD Unmuter details', onclick: (e) => e.stopPropagation() },
-    h('div', { class: 'vu-panel-inner' },
-      checking
-        ? h('div', { class: 'vu-verdict' }, h('div', { class: 'vu-verdict-line vu-wait' },
-            checkingText(state, state.sample && state.sample.done >= state.sample.size ? state.sample : null).split('\n\n').join(' ')))
-        : verdictBox(state),
-      h('div', { class: 'vu-stats' },
-        state.quality ? [h('span', null, 'Quality'), h('span', null, state.quality)] : null,
-        h('span', null, 'Muted segments'), h('span', null, muted),
-        h('span', null, 'Unmuted'), h('span', { class: 'vu-ok-c' }, restored),
-        state.fromOther ? [h('span', null, '…using other qualities'), h('span', null, state.fromOther)] : null,
-        state.fromSaved ? [h('span', null, '…using your saved copy'), h('span', null, state.fromSaved)] : null,
-        checking ? [h('span', null, 'Checked so far'), h('span', null, `${state.done || 0} / ${muted}`)] : null,
-        h('span', null, checking ? 'Muted so far' : 'Still muted'), h('span', { class: muted - restored ? 'vu-no-c' : '' },
-          checking ? (state.done || 0) - restored : muted - restored),
-        state.unknown ? [h('span', null, '…not checked yet (network problem, retrying)'), h('span', null, state.unknown)] : null,
-        h('span', null, 'Audio restored'), h('span', null, `${span(state.restoredSeconds)} / ${span(state.mutedSeconds)}`)),
-      h('div', { class: 'vu-meter', title: `${pct}% of the muted time restored` },
-        h('div', { style: `width:${pct}%` })),
-      savedSection(),
-      h('div', { class: 'vu-list-title' }, 'Muted parts of this VOD'),
-      state.ranges.map((r) => {
-        const label = r.restored ? span(r.end - r.start) : REASON_SHORT[mainReason(r)] || 'still muted';
-        return h('div', {
-          class: 'vu-row', role: 'button', tabindex: '0',
-          title: `Jump to ${clock(r.start)}`,
-          'aria-label': `Jump to ${clock(r.start)} – ${clock(r.end)}, ${r.restored ? 'unmuted, ' + label : label}`,
-          onclick: () => seekToTime(r.start),
-          onkeydown: (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); seekToTime(r.start); } },
-        },
-          h('span', { class: 'vu-dot', style: `background:${r.kind === 'pending' ? '#8a8a93' : r.kind === 'wait' ? '#facc15' : !r.restored ? '#e84848' : (r.sources || []).every((x) => x.kind === 'saved') ? '#a970ff' : '#22c55e'}` }),
-          h('span', null, `${clock(r.start)} – ${clock(r.end)}`),
-          h('span', { class: 'vu-len' }, label, viaText(r)));
-      }),
-      restored < muted
-        ? h('div', { class: 'vu-sub', style: 'margin-top:8px' },
-            'Hover a red part of the seek bar to see why it is still muted.')
-        : null,
-      h('div', { style: 'margin-top:8px' }, diagButton())));
+  const inner = h('div', { class: 'vu-panel-inner' },
+    checking
+      ? h('div', { class: 'vu-verdict' }, h('div', { class: 'vu-verdict-line vu-wait' },
+          checkingText(state, state.sample && state.sample.done >= state.sample.size ? state.sample : null).split('\n\n').join(' ')))
+      : verdictBox(state),
+    h('div', { class: 'vu-stats' },
+      state.quality ? [h('span', null, 'Quality'), h('span', null, state.quality)] : null,
+      h('span', null, 'Muted segments'), h('span', null, muted),
+      h('span', null, 'Unmuted'), h('span', { class: 'vu-ok-c' }, restored),
+      state.fromOther ? [h('span', null, '…using other qualities'), h('span', null, state.fromOther)] : null,
+      state.fromSaved ? [h('span', null, '…using your saved copy'), h('span', null, state.fromSaved)] : null,
+      checking ? [h('span', null, 'Checked so far'), h('span', null, `${state.done || 0} / ${muted}`)] : null,
+      h('span', null, checking ? 'Muted so far' : 'Still muted'), h('span', { class: muted - restored ? 'vu-no-c' : '' },
+        checking ? (state.done || 0) - restored : muted - restored),
+      state.unknown ? [h('span', null, '…not checked yet (network problem, retrying)'), h('span', null, state.unknown)] : null,
+      h('span', null, 'Audio restored'), h('span', null, `${span(state.restoredSeconds)} / ${span(state.mutedSeconds)}`)),
+    h('div', { class: 'vu-meter', title: `${pct}% of the muted time restored` },
+      h('div', { style: `width:${pct}%` })),
+    savedSection(),
+    h('div', { class: 'vu-list-title' }, 'Muted parts of this VOD'),
+    state.ranges.map((r) => {
+      const label = r.restored ? span(r.end - r.start) : REASON_SHORT[mainReason(r)] || 'still muted';
+      return h('div', {
+        class: 'vu-row', role: 'button', tabindex: '0',
+        title: `Jump to ${clock(r.start)}`,
+        'aria-label': `Jump to ${clock(r.start)} – ${clock(r.end)}, ${r.restored ? 'unmuted, ' + label : label}`,
+        onclick: () => seekToTime(r.start),
+        onkeydown: (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); seekToTime(r.start); } },
+      },
+        h('span', { class: 'vu-dot', style: `background:${r.kind === 'pending' ? '#8a8a93' : r.kind === 'wait' ? '#facc15' : !r.restored ? '#e84848' : (r.sources || []).every((x) => x.kind === 'saved') ? '#a970ff' : '#22c55e'}` }),
+        h('span', null, `${clock(r.start)} – ${clock(r.end)}`),
+        h('span', { class: 'vu-len' }, label, viaText(r)));
+    }),
+    restored < muted
+      ? h('div', { class: 'vu-sub', style: 'margin-top:8px' },
+          'Hover a red part of the seek bar to see why it is still muted.')
+      : null,
+    h('div', { style: 'margin-top:8px' }, diagButton()));
 
-  ui.badge.append(button, panel);
+  const prevPanel = ui.badge.querySelector && ui.badge.querySelector('.vu-panel');
+  if (button === prevBtn && prevPanel) {
+    prevPanel.replaceChildren(inner);
+  } else {
+    const panel = h('div', { class: 'vu-panel', role: 'region', 'aria-label': 'VOD Unmuter details', onclick: (e) => e.stopPropagation() }, inner);
+    ui.badge.replaceChildren(button, panel);
+  }
+  if (prevScroll) inner.scrollTop = prevScroll;
 }
 
 // "Saved on this computer" part of the panel.
@@ -183,7 +209,7 @@ export function savedSection() {
         : sv.mode !== 'whole'
           ? 'Only parts ahead of where you are are kept (after 20 s of playback there). Rewinding to an earlier part plays muted once Twitch deletes the original.'
           : 'The rest will be saved while you watch.'),
-      sv.saved ? h('div', { style: 'display:flex;gap:14px' },
+      sv.saved ? h('div', { class: 'vu-save-actions' },
         link('Delete saved audio for this VOD', 'deleteSaved'),
         h('button', { class: 'vu-link', onclick: (e) => {
           e.stopPropagation();
