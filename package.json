@@ -1,6 +1,6 @@
 {
   "name": "twitch-vod-unmuter",
-  "version": "1.5.0",
+  "version": "1.6.0",
   "private": true,
   "description": "Browser extension (Chrome and Firefox) that restores the sound in muted parts of Twitch VODs",
   "license": "MIT",
@@ -16,7 +16,7 @@
     "test:unit": "node --test test/unit/*.test.mjs",
     "test": "npm --prefix test test",
     "check-twitch": "npm --prefix test run check-twitch",
-    "check-version": "node -e \"const m=require('./manifest.json'),p=require('./package.json');if(m.version!==p.version){console.error('manifest.json is '+m.version+', package.json is '+p.version);process.exit(1)}\""
+    "check-version": "node -e \"const fs=require('fs'),m=require('./manifest.json'),p=require('./package.json'),r=fs.readFileSync('README.md','utf8'),c=fs.readFileSync('CHANGELOG.md','utf8'),v=m.version;if(p.version!==v)throw new Error('manifest '+v+' != package '+p.version);if(!r.includes('chrome-'+v+'.zip')||!r.includes('firefox-'+v+'.zip'))throw new Error('README.md zip version != '+v);if(!new RegExp('^## '+v.replace(/\\./g,'\\\\.')+'\\\\b','m').test(c))throw new Error('CHANGELOG.md missing ## '+v);\""
   },
   "devDependencies": {
     "web-ext": "^10.8.0"
