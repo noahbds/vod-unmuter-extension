@@ -12,7 +12,7 @@ export function browserName(uaString) {
   return `${name} ${m ? m[1].split('.')[0] : '?'} (${os})`;
 }
 
-export function collectReplies(timeoutMs) {
+function collectReplies(timeoutMs) {
   return new Promise((resolve) => {
     const id = Math.random().toString(36).slice(2);
     const replies = [];
@@ -67,7 +67,7 @@ export async function buildDiag() {
   return { text: lines.join('\n'), problems, notes };
 }
 
-export async function copyText(text) {
+async function copyText(text) {
   try { await navigator.clipboard.writeText(text); return true; } catch (e) { /* fall back */ }
   const ta = h('textarea', { style: 'position:fixed;opacity:0' });
   ta.value = text;

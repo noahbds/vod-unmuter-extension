@@ -53,7 +53,7 @@ export function speakerIcon(on) {
   return svg;
 }
 
-export const pad = (n) => String(Math.floor(n)).padStart(2, '0');
+const pad = (n) => String(Math.floor(n)).padStart(2, '0');
 export function clock(s) {
   s = Math.max(0, Math.round(s));
   const hh = Math.floor(s / 3600), mm = Math.floor((s % 3600) / 60), ss = s % 60;
@@ -126,7 +126,7 @@ export const UI_CSS = `
   .vu-ctrl:hover .vu-panel, .vu-ctrl.vu-open .vu-panel { display: block; }
   .vu-panel-inner {
     box-sizing: border-box; font-weight: 500; line-height: 1.4; cursor: default;
-    width: 320px; max-height: 340px; overflow-y: auto;
+    width: 320px; max-width: calc(100vw - 24px); max-height: var(--vu-max-panel-h, 340px); overflow-y: auto;
     background: rgba(14, 14, 16, 0.96); border: 1px solid rgba(255,255,255,.1);
     border-radius: 10px; padding: 12px 14px; box-shadow: 0 6px 24px rgba(0,0,0,.5);
   }
@@ -136,7 +136,12 @@ export const UI_CSS = `
   .vu-meter { height: 6px; border-radius: 3px; background: rgba(232,72,72,.85); overflow: hidden; margin: 8px 0 10px; }
   .vu-meter > div { height: 100%; background: #22c55e; }
   .vu-list-title { color: #adadb8; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .06em; margin-bottom: 5px; }
+  .vu-list-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 5px; }
+  .vu-list-head .vu-list-title { margin-bottom: 0; }
+  .vu-step-btns { display: inline-flex; gap: 8px; }
+  .vu-step-btns .vu-link { margin-top: 0; font-size: 11.5px; }
   .vu-row { display: flex; align-items: center; gap: 8px; padding: 4px 6px; margin: 0 -6px; border-radius: 5px; font-variant-numeric: tabular-nums; }
+  .vu-row.vu-row-current { background: rgba(169, 112, 255, 0.16); }
   .vu-row[role="button"] { cursor: pointer; }
   .vu-row[role="button"]:hover { background: rgba(255, 255, 255, 0.08); }
   .vu-row[role="button"]:focus-visible { outline: 2px solid #a970ff; outline-offset: 1px; background: rgba(255, 255, 255, 0.08); }
@@ -171,4 +176,12 @@ export const UI_CSS = `
   .vu-link { all: unset; cursor: pointer; color: #bf94ff; font-size: 12px; margin-top: 4px; display: inline-block; }
   .vu-link:hover { text-decoration: underline; }
   .vu-link:focus-visible { outline: 2px solid #a970ff; outline-offset: 2px; border-radius: 2px; }
+  .vu-toast {
+    position: absolute; bottom: 58px; left: 50%; transform: translateX(-50%); z-index: 2001;
+    display: inline-flex; align-items: center; gap: 10px; padding: 6px 12px; border-radius: 999px;
+    background: rgba(14, 14, 16, 0.92); border: 1px solid rgba(255,255,255,.14); color: #efeff1;
+    font: 500 12.5px/1.3 Inter, Roobert, "Helvetica Neue", Helvetica, Arial, sans-serif;
+    box-shadow: 0 4px 16px rgba(0,0,0,.45); white-space: nowrap;
+  }
+  .vu-toast .vu-link { margin-top: 0; font-weight: 600; }
 `;

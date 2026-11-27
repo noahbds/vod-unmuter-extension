@@ -11,6 +11,34 @@ export function seekToTime(sec) {
   if (!v) return;
   ui.manualSeekUntil = Date.now() + 3000;
   v.currentTime = Math.max(0, sec);
+  ui.currentTime = v.currentTime;
+  highlightCurrentRange();
+}
+
+function stepRange(delta) {
+  const ranges = ui.state && ui.state.ranges;
+  if (!Array.isArray(ranges) || !ranges.length) return;
+  const t = ui.currentTime || 0;
+  let target = null;
+  if (delta > 0) target = ranges.find((r) => r.start > t + 1) || ranges[0];
+  else {
+    for (let i = ranges.length - 1; i >= 0; i--) {
+      if (ranges[i].start < t - 2) { target = ranges[i]; break; }
+    }
+    if (!target) target = ranges[ranges.length - 1];
+  }
+  if (target) seekToTime(target.start);
+}
+
+export function highlightCurrentRange() {
+  if (!ui.badge || !ui.badge.querySelectorAll) return;
+  const t = ui.currentTime;
+  for (const row of ui.badge.querySelectorAll('.vu-row')) {
+    const start = Number(row.getAttribute && row.getAttribute('data-start'));
+    const end = Number(row.getAttribute && row.getAttribute('data-end'));
+    const active = Number.isFinite(start) && Number.isFinite(end) && t >= start && t < end;
+    if (row.classList) row.classList.toggle('vu-row-current', active);
+  }
 }
 
 export function setPanelPinned(open, returnFocus) {
@@ -134,11 +162,19 @@ export function renderBadge() {
     h('div', { class: 'vu-meter', title: `${pct}% of the muted time restored` },
       h('div', { style: `width:${pct}%` })),
     savedSection(),
-    h('div', { class: 'vu-list-title' }, 'Muted parts of this VOD'),
+    state.ranges.length > 1
+      ? h('div', { class: 'vu-list-head' },
+          h('div', { class: 'vu-list-title' }, 'Muted parts of this VOD'),
+          h('span', { class: 'vu-step-btns' },
+            h('button', { class: 'vu-link', title: 'Jump to previous muted part', onclick: (e) => { e.stopPropagation(); stepRange(-1); } }, '‹ Prev'),
+            h('button', { class: 'vu-link', title: 'Jump to next muted part', onclick: (e) => { e.stopPropagation(); stepRange(1); } }, 'Next ›')))
+      : h('div', { class: 'vu-list-title' }, 'Muted parts of this VOD'),
     state.ranges.map((r) => {
       const label = r.restored ? span(r.end - r.start) : REASON_SHORT[mainReason(r)] || 'still muted';
+      const active = ui.currentTime >= r.start && ui.currentTime < r.end;
       return h('div', {
-        class: 'vu-row', role: 'button', tabindex: '0',
+        class: 'vu-row' + (active ? ' vu-row-current' : ''), role: 'button', tabindex: '0',
+        'data-start': String(r.start), 'data-end': String(r.end),
         title: `Jump to ${clock(r.start)}`,
         'aria-label': `Jump to ${clock(r.start)} – ${clock(r.end)}, ${r.restored ? 'unmuted, ' + label : label}`,
         onclick: () => seekToTime(r.start),
@@ -165,20 +201,21 @@ export function renderBadge() {
 }
 
 // "Saved on this computer" part of the panel.
-export function savedSection() {
+function savedSection() {
   const state = ui.state;
   const sv = state && state.save;
   if (!sv) return null;
-  const send = (type) => (e) => {
+  const send = (type, extra) => (e) => {
     e.stopPropagation();
-    if (ui.channel) ui.channel.postMessage({ type, vodKey: state.vodKey });
+    if (ui.channel) ui.channel.postMessage(Object.assign({ type, vodKey: state.vodKey }, extra || {}));
   };
-  const link = (label, type) => h('button', { class: 'vu-link', onclick: send(type) }, label);
+  const link = (label, type, extra) => h('button', { class: 'vu-link', onclick: send(type, extra) }, label);
   let body;
-  if (!sv.enabled) {
+  if (!sv.enabled && !sv.forced) {
     body = [h('div', { class: 'vu-sub' },
-      'Saving is off. Turn on "Save audio for later" in the extension menu to keep this VOD unmuted after Twitch deletes the originals (about a day after the stream).')];
+      'Saving is off. Turn on "Save audio for later" in the extension menu to keep VODs unmuted after Twitch deletes the originals (about a day after the stream).')];
     if (sv.saved) body.push(h('div', { class: 'vu-sub' }, `Still saved from before: ${sv.saved} segments · ${mb(sv.bytes)}`));
+    if (sv.savable > sv.saved) body.push(link('Save this VOD', 'saveNow', { forceWhole: true }));
   } else if (sv.paused && !sv.saved) {
     body = [h('div', { class: 'vu-sub' }, 'Deleted. Nothing is saved for this VOD.'),
       sv.savable ? link('Save it again', 'saveNow') : null];
@@ -196,19 +233,28 @@ export function savedSection() {
     body = [h('div', { class: 'vu-sub' }, 'Nothing to save: Twitch already deleted the originals.')];
   } else {
     const all = sv.saved >= sv.savable;
+    const aheadOnly = sv.mode !== 'whole' && !sv.forced;
     body = [
-      h('div', null, h('span', { class: all ? 'vu-save-c' : '' }, `${sv.saved} / ${sv.savable}`),
-        ' segments saved', sv.bytes ? h('span', { class: 'vu-sub' }, ` · ${mb(sv.bytes)}`) : null),
+      h('div', { style: 'display:flex;justify-content:space-between;align-items:baseline;gap:8px' },
+        h('span', null, h('span', { class: all ? 'vu-save-c' : '' }, `${sv.saved} / ${sv.savable}`),
+          ' segments saved', sv.bytes ? h('span', { class: 'vu-sub' }, ` · ${mb(sv.bytes)}`) : null),
+        sv.saved ? h('button', {
+          class: 'vu-link', style: 'margin-top:0',
+          title: sv.pinned ? 'Unpin: allow automatic deletion again' : 'Pin: never delete this VOD automatically',
+          'aria-pressed': String(!!sv.pinned),
+          onclick: send('pinSaved', { pinned: !sv.pinned }),
+        }, sv.pinned ? '📌 Pinned' : '📍 Pin') : null),
       sv.compressing
         ? h('div', { class: 'vu-sub' }, `Compressing… ${sv.compressing.done} / ${sv.compressing.total}`)
         : h('div', { class: 'vu-sub' }, sv.aac === false && sv.quality !== 'original'
           ? 'Saved in original quality (lossless): this browser can\'t compress audio'
           : QUALITY_LABEL[sv.quality] || ''),
       h('div', { class: 'vu-sub' }, all
-        ? 'This VOD stays unmuted after Twitch deletes the originals.'
-        : sv.mode !== 'whole'
+        ? (sv.pinned ? 'Pinned: kept on this computer forever.' : 'This VOD stays unmuted after Twitch deletes the originals.')
+        : aheadOnly
           ? 'Only parts ahead of where you are are kept (after 20 s of playback there). Rewinding to an earlier part plays muted once Twitch deletes the original.'
           : 'The rest will be saved while you watch.'),
+      !all && aheadOnly && sv.savable > sv.saved ? link('Save whole VOD', 'saveNow', { forceWhole: true }) : null,
       sv.saved ? h('div', { class: 'vu-save-actions' },
         link('Delete saved audio for this VOD', 'deleteSaved'),
         h('button', { class: 'vu-link', onclick: (e) => {

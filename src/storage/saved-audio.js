@@ -58,28 +58,36 @@ export async function loadRecord(vod, num) {
 }
 export const loadSaved = async (vod, num) => recordToAudio(await loadRecord(vod, num));
 
+let cachedTotalBytes = null;
+let cachedTotalAt = 0;
+export function invalidateSavedTotal() { cachedTotalBytes = null; cachedTotalAt = 0; }
+
 // Adds a segment (or replaces it, for compression) and keeps the VOD's
 // totals up to date. `onQuotaExceeded(vod)` is called if storage is full.
 export async function putRecord(vod, num, rec, replace, onQuotaExceeded) {
   const bytes = recBytes(rec);
   try {
-    return await idb(['audio', 'vods'], 'readwrite', (store, vods, out) => {
+    let delta = 0;
+    const res = await idb(['audio', 'vods'], 'readwrite', (store, vods, out) => {
       const key = vod + '|' + num;
       const old = store.get(key);
       old.onsuccess = () => {
         if (old.result !== undefined && !replace) return;
         const before = old.result ? recBytes(old.result) : 0;
+        delta = bytes - before;
         store.put(rec, key);
         const v = vods.get(vod);
         v.onsuccess = () => {
           const info = v.result || Object.assign({ vod, savedAt: Date.now(), segments: 0, bytes: 0 }, vodInfo(vod));
           if (!old.result) info.segments++;
-          info.bytes += bytes - before;
+          info.bytes += delta;
           vods.put(info);
           out.value = info;
         };
       };
     });
+    if (res && cachedTotalBytes !== null) cachedTotalBytes = Math.max(0, cachedTotalBytes + delta);
+    return res;
   } catch (e) {
     if (e && e.name === 'QuotaExceededError') {
       // The browser's storage for twitch.tv is full (disk nearly full, or
@@ -98,33 +106,53 @@ export function noteStorageFull(e) {
   storageFull = true;
 }
 
-// Removes one part's saved copy and keeps the VOD's totals right.
-export async function deleteSavedSegment(vod, num) {
+// Removes saved copies in one transaction and keeps the VOD's totals right.
+export async function deleteSavedSegments(vod, nums) {
+  if (!nums || !nums.length) return;
   try {
+    let removedBytes = 0;
     await idb(['audio', 'vods'], 'readwrite', (audio, vods) => {
-      const key = vod + '|' + num;
-      const old = audio.get(key);
-      old.onsuccess = () => {
-        if (!old.result) return;
-        audio.delete(key);
+      let remaining = nums.length;
+      let removedCount = 0;
+      const done = () => {
+        if (!removedCount) return;
         const v = vods.get(vod);
         v.onsuccess = () => {
           if (!v.result) return;
-          v.result.segments = Math.max(0, v.result.segments - 1);
-          v.result.bytes = Math.max(0, v.result.bytes - recBytes(old.result));
+          v.result.segments = Math.max(0, v.result.segments - removedCount);
+          v.result.bytes = Math.max(0, v.result.bytes - removedBytes);
           vods.put(v.result); // kept even when empty: it remembers the position ("Parts ahead of me")
         };
       };
+      for (const num of nums) {
+        const key = vod + '|' + num;
+        const old = audio.get(key);
+        old.onsuccess = () => {
+          if (old.result) {
+            audio.delete(key);
+            removedCount++;
+            removedBytes += recBytes(old.result);
+          }
+          if (--remaining === 0) done();
+        };
+      }
     });
-  } catch (e) { log('warn', `could not remove the saved copy of part ${num} of VOD ${vod} (watched or behind you)`, e); }
+    if (cachedTotalBytes !== null) cachedTotalBytes = Math.max(0, cachedTotalBytes - removedBytes);
+  } catch (e) { log('warn', `could not remove saved copies (${nums.length} part(s)) of VOD ${vod}`, e); }
 }
 
-export async function deleteSavedVod(vod) {
+export async function deleteSavedVods(vodList) {
+  if (!vodList || !vodList.length) return;
+  invalidateSavedTotal();
   await idb(['audio', 'vods'], 'readwrite', (audio, vods) => {
-    audio.delete(audioRange(vod));
-    vods.delete(vod);
+    for (const vod of vodList) {
+      audio.delete(audioRange(vod));
+      vods.delete(vod);
+    }
   });
 }
+
+export const deleteSavedVod = (vod) => deleteSavedVods([vod]);
 
 // Changes fields of a saved VOD's record (not its audio). Returns false
 // when the VOD has nothing saved.
@@ -159,7 +187,8 @@ export async function expireSaved(keepDays) {
   expireGone();
   if (!keepDays) return; // 0 = keep forever
   const limit = Date.now() - keepDays * 864e5;
-  for (const v of await listSaved(true)) if (v.savedAt < limit && !v.pinned) await deleteSavedVod(v.vod);
+  const expired = (await listSaved(true)).filter((v) => v.savedAt < limit && !v.pinned).map((v) => v.vod);
+  if (expired.length) await deleteSavedVods(expired);
 }
 
 // Storage limit: delete the oldest other saves first; if this VOD alone
@@ -168,8 +197,12 @@ export async function makeRoom(job, incoming) {
   const maxMB = Number(settings.maxStorageMB) || 0;
   if (!maxMB) return true;
   const limit = maxMB * 1e6;
+  if (cachedTotalBytes !== null && Date.now() - cachedTotalAt < 30000 && cachedTotalBytes + incoming <= limit) return true;
   const all = await listSaved();
-  let total = all.reduce((n, v) => n + v.bytes, 0) + incoming;
+  const baseTotal = all.reduce((n, v) => n + v.bytes, 0);
+  cachedTotalBytes = baseTotal;
+  cachedTotalAt = Date.now();
+  let total = baseTotal + incoming;
   if (total <= limit) return true;
   for (const v of all.filter((x) => x.vod !== job.vodKey && !x.pinned).sort((a, b) => a.savedAt - b.savedAt)) {
     if (total <= limit) break;

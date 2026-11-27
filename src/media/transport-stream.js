@@ -13,23 +13,28 @@ export function scanTs(buf) {
     const afc = (buf[o + 3] >> 4) & 3;
     if (!(afc & 1)) continue;
     let p = o + 4 + ((afc & 2) ? 1 + buf[o + 4] : 0);
+    if (p >= o + PKT) continue;
     if (pid === 0 && pmtPid < 0) {
       p += 1 + buf[p];
+      if (p + 3 > o + PKT) continue;
       const secLen = ((buf[p + 1] & 0x0f) << 8) | buf[p + 2];
-      for (let q = p + 8; q < p + 3 + secLen - 4; q += 4) {
+      const end = Math.min(o + PKT, p + 3 + secLen - 4);
+      for (let q = p + 8; q + 4 <= end; q += 4) {
         if (((buf[q] << 8) | buf[q + 1]) !== 0) { pmtPid = ((buf[q + 2] & 0x1f) << 8) | buf[q + 3]; break; }
       }
     } else if (pid === pmtPid && audioPid < 0) {
       p += 1 + buf[p];
+      if (p + 12 > o + PKT) continue;
       const secLen = ((buf[p + 1] & 0x0f) << 8) | buf[p + 2];
       const infoLen = ((buf[p + 10] & 0x0f) << 8) | buf[p + 11];
-      for (let q = p + 12 + infoLen; q < p + 3 + secLen - 4;) {
+      const end = Math.min(o + PKT, p + 3 + secLen - 4);
+      for (let q = p + 12 + infoLen; q + 5 <= end;) {
         const type = buf[q];
         const esLen = ((buf[q + 3] & 0x0f) << 8) | buf[q + 4];
         if (type === 0x0f || type === 0x11) { audioPid = ((buf[q + 1] & 0x1f) << 8) | buf[q + 2]; audioType = type; break; }
         q += 5 + esLen;
       }
-    } else if (pid === audioPid && buf[p] === 0 && buf[p + 1] === 0 && buf[p + 2] === 1 && (buf[p + 7] & 0x80)) {
+    } else if (pid === audioPid && p + 14 <= o + PKT && buf[p] === 0 && buf[p + 1] === 0 && buf[p + 2] === 1 && (buf[p + 7] & 0x80)) {
       pts = ((buf[p + 9] >> 1) & 7) * 1073741824 +
         ((buf[p + 10] << 22) | ((buf[p + 11] >> 1) << 15) | (buf[p + 12] << 7) | (buf[p + 13] >> 1));
     }

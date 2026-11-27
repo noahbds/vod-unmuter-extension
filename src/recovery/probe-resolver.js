@@ -1,7 +1,7 @@
 // Hook module (page and player worker): see src/hook.js.
 
 import { FALLBACK_DIRS, fileLabel, fmtTime, isMiss, jobName, MAX_PARALLEL, partName, prettyQuality, SAVE_PARALLEL, sleep, SUFFIXES } from '../shared/constants.js';
-import { known, mp4Inits, pending, realFetch, renditions } from '../shared/state.js';
+import { dirExts, known, mp4Dirs, mp4Inits, pending, realFetch, renditions } from '../shared/state.js';
 import { log } from '../shared/logger.js';
 import { markMissing } from '../storage/gone-cache.js';
 import { jobOf, reasonOf } from './recovery-state.js';
@@ -22,15 +22,15 @@ export function makeLimiter(max) {
     if (active < max) run(); else waiting.push(run);
   });
 }
-export const limited = makeLimiter(MAX_PARALLEL);
+const limited = makeLimiter(MAX_PARALLEL);
 export const saveLimited = makeLimiter(SAVE_PARALLEL);
 
 // HEAD requests are unreliable on Twitch's CDN (they sometimes fail CORS
 // even for files that exist), so probe with GET and abort the body.
 // For the logs, each answer is noted in `answers` (url -> { tries: [200,
 // 404, 503 or 'network error'], ms }) until the check that asked reads it.
-export const answers = new Map();
-export async function probeOnce(url) {
+const answers = new Map();
+async function probeOnce(url) {
   const note = { tries: [], ms: 0 };
   answers.set(url, note);
   if (answers.size > 500) answers.delete(answers.keys().next().value); // the player's own probes are never read back
@@ -83,8 +83,8 @@ export function donorSources(seg, dirs) {
 
 // An MP4 VOD's init file of a quality (track list), fetched once.
 export function loadInit(job, dir) {
-  if (!job.initName) return Promise.resolve(null);
-  const url = job.vodBase + dir + '/' + job.initName;
+  const name = job.initName || 'init-0.mp4';
+  const url = job.vodBase + dir + '/' + name;
   if (!mp4Inits.has(url)) {
     mp4Inits.set(url, realFetch.call(scope, url).then((r) => (r.ok ? r.arrayBuffer().then((b) => new Uint8Array(b)) : null)).catch(() => null)
       .then((b) => { if (!b) mp4Inits.delete(url); return b; })); // not cached when it failed
@@ -92,11 +92,45 @@ export function loadInit(job, dir) {
   return mp4Inits.get(url);
 }
 
-export function urlFor(seg, source) {
+// Which container a rendition directory uses ('.mp4' or '.ts'). Enhanced
+// Broadcasting streams can serve high qualities as .mp4 while audio_only and
+// lower qualities stay .ts: probed at most once per (VOD, quality) via its
+// unmuted init-0.mp4 header, and 0 requests on pure .ts VODs.
+export function renditionExt(job, dir) {
+  if (dir === job.dir) return Promise.resolve(job.mp4 ? '.mp4' : '.ts');
+  const knownMp4 = mp4Dirs.get(job.vodBase);
+  if (knownMp4 && knownMp4.has(dir)) return Promise.resolve('.mp4');
+  if (!job.mp4) return Promise.resolve('.ts');
+  const key = job.vodBase + dir;
+  if (!dirExts.has(key)) {
+    const initUrl = job.vodBase + dir + '/' + (job.initName || 'init-0.mp4');
+    dirExts.set(key, realFetch.call(scope, initUrl).then(async (r) => {
+      if (r.ok) {
+        const b = new Uint8Array(await r.arrayBuffer());
+        mp4Inits.set(initUrl, Promise.resolve(b));
+        return '.mp4';
+      }
+      try { r.body && r.body.cancel(); } catch (e) { /* ignore */ }
+      if (isMiss(r.status)) return '.ts';
+      dirExts.delete(key);
+      return '.mp4';
+    }).catch(() => { dirExts.delete(key); return '.mp4'; }));
+  }
+  return dirExts.get(key);
+}
+
+export function urlFor(seg, source, ext) {
   const slash = source.indexOf('/');
   if (slash < 0) return seg.urls[source];
   const sfx = source.slice(slash + 1);
-  return seg.job.vodBase + source.slice(0, slash) + '/' + seg.num + (seg.job.mp4 ? sfx.replace(/\.ts$/, '.mp4') : sfx) + seg.query;
+  const useMp4 = ext ? ext === '.mp4' : !!seg.job.mp4;
+  return seg.job.vodBase + source.slice(0, slash) + '/' + seg.num + (useMp4 ? sfx.replace(/\.ts$/, '.mp4') : sfx) + seg.query;
+}
+
+export async function donorUrlFor(seg, source) {
+  const slash = source.indexOf('/');
+  if (slash < 0) return seg.urls[source];
+  return urlFor(seg, source, await renditionExt(seg.job, source.slice(0, slash)));
 }
 
 // Both return the first source found, or null. `seg.unknown` is set when
@@ -105,7 +139,7 @@ export function urlFor(seg, source) {
 // tries, ms } (remembered: answered from memory or the deleted-files cache,
 // no request; tries: the HTTP status of each try; ms: time spent on them).
 async function ask(seg, source, tried) {
-  const url = urlFor(seg, source);
+  const url = source.includes('/') ? await donorUrlFor(seg, source) : urlFor(seg, source);
   const remembered = known.has(url);
   const found = await probe(url);
   const note = answers.get(url);
@@ -121,7 +155,7 @@ export async function findOwn(seg, tried) {
   }
   return null;
 }
-export async function findDonor(seg, dirs, tried) {
+async function findDonor(seg, dirs, tried) {
   for (const source of donorSources(seg, dirs)) {
     const found = await ask(seg, source, tried);
     if (found) return source;
@@ -177,7 +211,7 @@ export function describeChecks(entries) {
 // How long checking took, and how much of it was spent waiting for one of
 // the MAX_PARALLEL request slots (the rest of the VOD is checked at the
 // same time) rather than on the requests themselves.
-export function describeTime(entries) {
+function describeTime(entries) {
   const ms = (n) => (n < 1000 ? `${n} ms` : `${(n / 1000).toFixed(1)} s`);
   const total = entries.map((e) => e.ms);
   const lo = Math.min(...total), hi = Math.max(...total);

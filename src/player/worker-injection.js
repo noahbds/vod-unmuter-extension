@@ -20,15 +20,25 @@ export function hookPlayerWorkers(hookSource) {
   // console warning in Firefox).
   const blobText = new WeakMap(); // Blob -> its text
   const urlText = new Map();      // blob: URL -> its text
+  const utf8 = new TextDecoder();
+
+  const partToText = (p) => {
+    if (typeof p === 'string') return p;
+    if (p instanceof ArrayBuffer) return utf8.decode(p);
+    if (ArrayBuffer.isView(p)) return utf8.decode(p);
+    return null;
+  };
 
   const OriginalBlob = window.Blob;
   window.Blob = class extends OriginalBlob {
     constructor(parts, options) {
       let text = null;
       try {
-        if (Array.isArray(parts) && parts.length && parts.every((p) => typeof p === 'string')) {
-          text = parts.join('');
-          if (isPlayerWorkerCode(text) && !text.includes(MARK)) { parts = [hookSource].concat(parts); text = hookSource + text; }
+        const list = parts ? Array.from(parts) : [];
+        const decoded = list.length ? list.map(partToText) : [];
+        if (decoded.length && decoded.every((s) => s !== null)) {
+          text = decoded.join('');
+          if (isPlayerWorkerCode(text) && !text.includes(MARK)) { parts = [hookSource].concat(list); text = hookSource + text; }
         }
       } catch (e) { text = null; /* leave it as it was */ }
       super(parts, options);
@@ -53,27 +63,26 @@ export function hookPlayerWorkers(hookSource) {
     constructor(scriptURL, options) {
       let finalURL = scriptURL;
       try {
-        const isModule = options && options.type === 'module';
+        const isModule = !!(options && options.type === 'module');
         const src = scriptURL instanceof URL ? scriptURL.href : String(scriptURL);
-        if (!isModule) {
-          let code;
-          if (src.startsWith('blob:')) {
-            let text = urlText.get(src);
-            if (text === undefined) {
-              // A Blob we didn't see being made: read its code back.
-              const xhr = new XMLHttpRequest();
-              xhr.open('GET', src, false);
-              xhr.overrideMimeType('text/javascript'); // (else Firefox tries to parse it as XML)
-              xhr.send();
-              text = xhr.responseText;
-            }
-            // Already hooked by (a)? Then leave it alone.
-            code = text.includes(MARK) ? null : hookSource + text;
-          } else {
-            code = hookSource + 'importScripts(' + JSON.stringify(new URL(src, location.href).href) + ');';
+        let code = null;
+        if (src.startsWith('blob:')) {
+          let text = urlText.get(src);
+          if (text === undefined && !isModule) {
+            // A Blob we didn't see being made: read its code back.
+            const xhr = new XMLHttpRequest();
+            xhr.open('GET', src, false);
+            xhr.overrideMimeType('text/javascript'); // (else Firefox tries to parse it as XML)
+            xhr.send();
+            text = xhr.responseText;
           }
-          if (code) finalURL = URL.createObjectURL(new OriginalBlob([code], { type: 'text/javascript' }));
+          // Already hooked by (a)? Then leave it alone.
+          if (text !== undefined && !text.includes(MARK)) code = hookSource + text;
+        } else {
+          const href = JSON.stringify(new URL(src, location.href).href);
+          code = hookSource + (isModule ? `import ${href};` : `importScripts(${href});`);
         }
+        if (code) finalURL = URL.createObjectURL(new OriginalBlob([code], { type: 'text/javascript' }));
       } catch (e) {
         console.warn('[VOD Unmuter] could not wrap worker, using the original', e);
         finalURL = scriptURL;

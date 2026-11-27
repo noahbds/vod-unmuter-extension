@@ -1,7 +1,7 @@
 // Hook module (page and player worker): see src/hook.js.
 
 import { HAS_MUTED_RE, jobName, MUTED_RE } from '../shared/constants.js';
-import { INSTANCE, IS_PAGE, ORIGIN, playlists, post, realFetch, renditions, RESTRICTED, segments, settings, vodIdsByBase } from '../shared/state.js';
+import { INSTANCE, IS_PAGE, mp4Dirs, ORIGIN, playlists, post, realFetch, renditions, RESTRICTED, segments, settings, vodIdsByBase } from '../shared/state.js';
 import { log, shortUrl } from '../shared/logger.js';
 import { currentJob, forgetCurrent, jobs, scheduleResult, sendState, switchVod } from '../recovery/recovery-state.js';
 import { checkAll, checkMore } from '../recovery/scan-scheduler.js';
@@ -9,11 +9,17 @@ import { checkAll, checkMore } from '../recovery/scan-scheduler.js';
 // ------------------------------------------------------------ playlists
 export function readMaster(text, masterUrl) {
   const byVod = new Map();
+  const mp4ByVod = new Map();
   // "/vod/123.m3u8", or "/vod/v2/123.m3u8" (Twitch's player since late 2026).
   const idMatch = String(masterUrl || '').match(/\/vod\/(?:v\d+\/)?(\d+)\.m3u8/);
+  let nextMp4 = false;
   for (const raw of text.split('\n')) {
     const line = raw.trim();
-    if (!line || line[0] === '#') continue;
+    if (!line) continue;
+    if (line[0] === '#') {
+      if (line.startsWith('#EXT-X-STREAM-INF:')) nextMp4 = /CODECS="[^"]*(?:hev1|hvc1|av01)/i.test(line);
+      continue;
+    }
     try {
       const u = new URL(line, masterUrl).href.split('?')[0];
       const dirEnd = u.lastIndexOf('/');
@@ -22,11 +28,20 @@ export function readMaster(text, masterUrl) {
       const dir = u.slice(vodEnd + 1, dirEnd);
       if (!byVod.has(vodBase)) byVod.set(vodBase, []);
       if (!byVod.get(vodBase).includes(dir)) byVod.get(vodBase).push(dir);
+      if (nextMp4) {
+        if (!mp4ByVod.has(vodBase)) mp4ByVod.set(vodBase, new Set());
+        mp4ByVod.get(vodBase).add(dir);
+      }
     } catch (e) { /* ignore */ }
+    nextMp4 = false;
   }
   for (const [vodBase, dirs] of byVod) {
     renditions.set(vodBase, dirs);
     if (idMatch) vodIdsByBase.set(vodBase, idMatch[1]);
+  }
+  for (const [vodBase, set] of mp4ByVod) {
+    if (!mp4Dirs.has(vodBase)) mp4Dirs.set(vodBase, new Set());
+    for (const d of set) mp4Dirs.get(vodBase).add(d);
   }
   log('debug', `master playlist${idMatch ? ' of VOD ' + idMatch[1] : ''}: ${[...byVod.values()].flat().join(', ') || 'no qualities'}`);
 }
@@ -45,16 +60,16 @@ export function rewritePlaylist(text, playlistUrl, auto, existing) {
     vodId: vodIdsByBase.get(vodBase) || null,       // Twitch VOD id, when known
     title: '',
     dir: base.slice(vodBase.length, -1),
-    base, vodBase, total: 0, segs: [], done: 0, found: 0, finished: false,
+    base, vodBase, total: 0, segs: [], byNum: new Map(), done: 0, found: 0, finished: false,
     saved: new Set(), savedBytes: 0, savedAt: null, saving: false, savedAll: false, noSave: false,
     limitReached: false, compressing: false, compressDone: 0, compressTotal: 0,
   };
+  if (!job.byNum) job.byNum = new Map(job.segs.map((x) => [x.num, x]));
   if (!job.vodId && vodIdsByBase.has(vodBase)) job.vodId = vodIdsByBase.get(vodBase);
   // Still recording: no end marker yet. Its newest files may not be in
   // every quality yet, so "not found" isn't remembered for good.
   job.live = !text.includes('#EXT-X-ENDLIST');
 
-  const have = new Map(job.segs.map((x) => [x.num, x]));
   const added = [];
   const lines = text.split('\n');
   let time = 0;
@@ -71,23 +86,27 @@ export function rewritePlaylist(text, playlistUrl, auto, existing) {
     if (!line || line[0] === '#') continue;
     const m = line.match(MUTED_RE);
     if (m) {
-      let seg = have.get(Number(m[2]));
+      const segNum = Number(m[2]);
+      let seg = job.byNum.get(segNum);
       if (seg) {
         seg.start = time;
         seg.duration = duration;
       } else {
-        // MP4 VOD (HEVC/AV1): "123-muted.mp4". Same names, other ending;
-        // only the files of the quality being watched are used (no other
-        // qualities, no saving: that needs reading MP4 audio).
+        // MP4 VOD (HEVC/AV1): "123-muted.mp4". Same names, ".mp4" ending.
         const ext = '.' + m[3];
-        if (ext === '.mp4') job.mp4 = true;
+        if (ext === '.mp4') {
+          job.mp4 = true;
+          if (!mp4Dirs.has(vodBase)) mp4Dirs.set(vodBase, new Set());
+          mp4Dirs.get(vodBase).add(job.dir);
+        }
         const at = (suffix) => new URL(m[1] + m[2] + suffix + (m[4] || ''), playlistUrl).href;
         seg = {
-          job, num: Number(m[2]), query: m[4] || '', start: time, duration,
+          job, num: segNum, query: m[4] || '', start: time, duration,
           urls: { '.ts': at(ext), '-unmuted.ts': at('-unmuted' + ext), muted: at('-muted' + ext) },
           source: undefined, confirmed: false,
         };
         job.segs.push(seg);
+        job.byNum.set(segNum, seg);
         added.push(seg);
         segments.set(seg.urls['.ts'], seg);
       }
@@ -105,7 +124,7 @@ export function rewritePlaylist(text, playlistUrl, auto, existing) {
     const kept = job.segs.filter((x) => stillMuted.has(x.num));
     const removed = job.segs.length - kept.length;
     if (removed) {
-      for (const x of job.segs) if (!stillMuted.has(x.num)) segments.delete(x.urls['.ts']);
+      for (const x of job.segs) if (!stillMuted.has(x.num)) { segments.delete(x.urls['.ts']); job.byNum.delete(x.num); }
       job.segs = kept;
       job.done = kept.filter((x) => x.source !== undefined).length;
       job.found = kept.filter((x) => x.source).length;
@@ -115,7 +134,7 @@ export function rewritePlaylist(text, playlistUrl, auto, existing) {
   }
   if (!job.segs.length) return null;
   job.total = time;
-  const out = { text: lines.join('\n'), raw: text, job };
+  const out = { text: lines.join('\n'), raw: job.live ? text : null, job };
   if (existing) {
     if (added.length) {
       job.segs.sort((a, b) => a.num - b.num);
@@ -125,7 +144,7 @@ export function rewritePlaylist(text, playlistUrl, auto, existing) {
   }
   // Another quality of this VOD may already know its saved size.
   const sibling = jobs.find((j) => j.vodKey === vodKey);
-  if (sibling) Object.assign(job, { savedBytes: sibling.savedBytes, savedAt: sibling.savedAt, noSave: sibling.noSave, vodId: job.vodId || sibling.vodId || null, title: job.title || sibling.title || '' });
+  if (sibling) Object.assign(job, { savedBytes: sibling.savedBytes, savedAt: sibling.savedAt, noSave: sibling.noSave, pinned: !!sibling.pinned, forceSave: !!sibling.forceSave, vodId: job.vodId || sibling.vodId || null, title: job.title || sibling.title || '', channel: job.channel || sibling.channel || '', streamedAt: job.streamedAt || sibling.streamedAt || null });
   job.auto = !!auto;
   // Another quality of this VOD is already being played (the player loads
   // several playlists when it adapts quality): wait until this one is.
@@ -142,8 +161,8 @@ export function rewritePlaylist(text, playlistUrl, auto, existing) {
 }
 
 // ------------------------------------------------------------ fetch hook
-export const restrictedNoted = new Set();
-export const unmutedNoted = new Set(); // VOD folders already logged as "no muted parts"
+const restrictedNoted = new Set();
+const unmutedNoted = new Set(); // VOD folders already logged as "no muted parts"
 export async function handleOther(input, init, url) {
   const res = await realFetch.call(scope, input, init);
   if (!settings.enabled || !url || !/\.m3u8(\?|$)/.test(url)) return res;
@@ -186,7 +205,7 @@ export async function handleOther(input, init, url) {
       post({ type: 'restricted', vod: vodBase, muted, origin: ORIGIN });
       return res;
     }
-    if (!entry || entry.raw !== text) {
+    if (!entry || ((entry.job.live || !text.includes('#EXT-X-ENDLIST')) && entry.raw !== text)) {
       // New, or Twitch's copy changed (a VOD still recording grows).
       entry = rewritePlaylist(text, playlistUrl, false, entry && entry.job);
       if (!entry) return res;

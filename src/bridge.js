@@ -25,10 +25,27 @@
     try { await api.runtime.sendMessage({ vu: 'autoCheckNow' }); } catch (e) { /* background asleep */ }
   }
 
+  const ALLOWED_SETTINGS = ['enabled', 'badge', 'recolor', 'saveAudio', 'saveMode', 'keepDays', 'saveQuality', 'maxStorageMB', 'autoOpenTab', 'debug', 'notify', 'skipMuted'];
+  async function applyBackupSettings(incoming, channels) {
+    const patch = {};
+    if (incoming && typeof incoming === 'object') {
+      for (const k of ALLOWED_SETTINGS) if (k in incoming) patch[k] = incoming[k];
+    }
+    if (Array.isArray(channels) && channels.length) {
+      const valid = channels.map((c) => String(c || '').toLowerCase()).filter((c) => /^[a-z0-9_]{2,25}$/.test(c));
+      if (valid.length) {
+        const { autoChannels } = await api.storage.sync.get({ autoChannels: [] });
+        patch.autoChannels = [...new Set(autoChannels.concat(valid))];
+      }
+    }
+    if (Object.keys(patch).length) await api.storage.sync.set(patch);
+  }
+
   window.addEventListener('message', (ev) => {
     if (ev.source !== window || !ev.data || ev.data.source !== 'vod-unmuter-page') return;
     if (ev.data.type === 'getSettings') send();
     if (ev.data.type === 'addAutoChannel' && typeof ev.data.login === 'string') addAutoChannel(ev.data.login.toLowerCase());
+    if (ev.data.type === 'applyBackupSettings' && window === window.top) applyBackupSettings(ev.data.settings, ev.data.autoChannels);
     if (ev.data.type === 'refreshSavedCache' && window === window.top) askPage({ action: 'list' }, 8000).then(cacheList);
   });
   api.storage.onChanged.addListener((changes, area) => { if (area === 'sync') send(); });
@@ -69,11 +86,17 @@
   api.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     if (!msg) return undefined;
 
-    // Popup: list / delete saved audio.
+    // Popup: list / delete / compress saved audio.
     if (msg.vu === 'storage') {
-      askPage({ action: msg.action, vodKey: msg.vodKey, channel: msg.channel, pinned: msg.pinned }, msg.action === 'diag' ? 4000 : 8000)
+      askPage({ action: msg.action, vodKey: msg.vodKey, vodKeys: msg.vodKeys, channel: msg.channel, pinned: msg.pinned, quality: msg.quality },
+        msg.action === 'diag' ? 4000 : msg.action === 'compress' ? 5 * 60 * 1000 : 8000)
         .then((reply) => { cacheList(reply); sendResponse(reply); });
       return true; // answer asynchronously
+    }
+
+    if (msg.vu === 'autoPing') {
+      sendResponse({ busy: autoBusy });
+      return undefined;
     }
 
     // Background: save these VODs. Answer at once, then report each VOD and
@@ -87,7 +110,8 @@
       (async () => {
         for (const vodId of msg.vodIds || []) {
           const title = (msg.titles && msg.titles[vodId]) || '';
-          const result = await askPage({ action: 'autosave', vodId, title }, 30 * 60 * 1000);
+          const meta = (msg.meta && msg.meta[vodId]) || { title };
+          const result = await askPage({ action: 'autosave', vodId, title, meta }, 30 * 60 * 1000);
           try { await api.runtime.sendMessage({ vu: 'autosaveDone', result: Object.assign({ vodId }, result) }); } catch (e) { /* background asleep */ }
         }
         autoBusy = false;

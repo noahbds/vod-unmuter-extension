@@ -20,22 +20,33 @@ export function startPageBridge() {
   async function answerStorage(request) {
     const store = window.__vodUnmuterStore;
     if (!store) return { error: 'unavailable' };
-    const forget = async (vodKey) => {
-      if (relay) relay.postMessage({ type: 'deleteSaved', vodKey }); // live player state
-      await store.remove(vodKey);
+    const forgetMany = async (keys) => {
+      if (!keys.length) return;
+      if (relay) for (const vodKey of keys) relay.postMessage({ type: 'deleteSaved', vodKey });
+      await (store.removeMany ? store.removeMany(keys) : Promise.all(keys.map((k) => store.remove(k))));
     };
     if (request.action === 'diag') {
       return window.__vodUnmuterDiag ? window.__vodUnmuterDiag() : { text: 'The extension\'s page script is not loaded.', problems: ['page script not loaded'] };
     }
+    if (request.action === 'compress') {
+      const stats = await store.compressSaved(request.vodKeys || null, request.quality);
+      let usage = null;
+      try { usage = await navigator.storage.estimate(); } catch (e) { /* ignore */ }
+      return { vods: await store.list(), quota: usage && usage.quota, compressed: stats };
+    }
     if (request.action === 'autosave') {
       const auto = window.__vodUnmuterAuto;
-      return auto ? auto.save(request.vodId, request.title) : { vodId: request.vodId, ok: false, error: 'unavailable' };
+      return auto ? auto.save(request.vodId, request.meta || request.title) : { vodId: request.vodId, ok: false, error: 'unavailable' };
     }
-    if (request.action === 'delete' && request.vodKey) await forget(request.vodKey);
-    else if (request.action === 'deleteAll') for (const v of await store.list()) await forget(v.vod);
+    if (request.action === 'delete' && request.vodKey) await forgetMany([request.vodKey]);
+    else if (request.action === 'deleteBatch' && Array.isArray(request.vodKeys)) await forgetMany(request.vodKeys);
+    else if (request.action === 'deleteAll') await forgetMany((await store.list()).map((v) => v.vod));
     else if (request.action === 'deleteChannel' && request.channel) {
-      for (const v of await store.list()) if (v.channel === request.channel && !v.pinned) await forget(v.vod);
-    } else if (request.action === 'pin' && request.vodKey) await store.pin(request.vodKey, request.pinned);
+      await forgetMany((await store.list()).filter((v) => v.channel === request.channel && !v.pinned).map((v) => v.vod));
+    } else if (request.action === 'pin' && request.vodKey) {
+      await store.pin(request.vodKey, request.pinned);
+      if (relay) relay.postMessage({ type: 'pinState', vodKey: request.vodKey, pinned: !!request.pinned });
+    }
     let usage = null;
     try { usage = await navigator.storage.estimate(); } catch (e) { /* ignore */ }
     return { vods: await store.list(), quota: usage && usage.quota };

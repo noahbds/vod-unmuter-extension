@@ -4,11 +4,11 @@ import { known } from '../shared/state.js';
 import { log } from '../shared/logger.js';
 import { goneTx } from './idb.js';
 
-export const GONE_KEEP_DAYS = 90;
+const GONE_KEEP_DAYS = 90;
 
-export const GONE_RE = /^([^/?]+)\/(\d+)(\.ts|-unmuted\.ts|\.mp4|-unmuted\.mp4)(?:\?.*)?$/;
-export const goneQueue = new Map(); // vod folder -> { "<quality>/<suffix>" -> Set(numbers) }
-export let goneTimer = null;
+const GONE_RE = /^([^/?]+)\/(\d+)(\.ts|-unmuted\.ts|\.mp4|-unmuted\.mp4)(?:\?.*)?$/;
+const goneQueue = new Map(); // vod folder -> { "<quality>/<suffix>" -> Set(numbers) }
+let goneTimer = null;
 
 // A file answered "not found": remember it (in memory and on disk). `job`
 // is the job of the VOD the file is in (jobOf(url)), if there is one.

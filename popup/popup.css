@@ -131,8 +131,14 @@ button.link { border: 0; background: none; padding: 0; color: var(--danger); fon
 .storage { margin-top: 8px; }
 .storage .line { display: flex; justify-content: space-between; font-size: 12px; color: var(--muted); }
 .storage b { color: var(--saved); font-size: 13px; }
-.meter { height: 6px; border-radius: 3px; background: var(--track); overflow: hidden; margin-top: 5px; }
+.meter { display: flex; height: 6px; border-radius: 3px; background: var(--track); overflow: hidden; margin-top: 5px; }
 .meter > div { height: 100%; background: var(--saved); }
+.meter > div.pinned-fill { opacity: 1; }
+.meter > div.evictable-fill { opacity: .6; }
+.filter {
+  width: 100%; margin-top: 6px; font: inherit; font-size: 12px; color: var(--fg);
+  background: var(--field); border: 1px solid var(--line); border-radius: 6px; padding: 5px 8px;
+}
 details.group { border-top: 1px solid var(--line); }
 details.group:first-of-type { border-top: 0; }
 details.group summary {

@@ -1,5 +1,70 @@
 # Changelog
 
+## 1.6.0
+
+In the player:
+- **Mixed MP4 ↔ MPEG-TS recovery on Enhanced Broadcasting VODs.** High qualities
+  streamed as fragmented MP4 (`1440p60` / `chunked` HEVC/AV1) can now borrow
+  sound from `.ts` qualities (`audio_only`, `720p60`, `480p30`) and save directly
+  from `audio_only/*.ts` (~40× smaller downloads than full `.mp4` video
+  segments), and `.ts` qualities can borrow sound from `.mp4` qualities. Each
+  donor quality's container is detected with at most one cached `init-0.mp4`
+  check per VOD (`0` extra requests on pure `.ts` VODs).
+- **Playhead-priority checking on long VODs.** After the initial 24-segment
+  spread sample, segments at and ahead of your current playback position are
+  checked first (wrapping around to `0:00` afterward), so seeking deep into a
+  long VOD resolves the seek bar around you right away.
+- **Live seek-bar hover details & smart auto-skip while checking.** Hovering
+  green, red or grey parts of the seek bar now shows details while the VOD is
+  still being checked, and *Skip parts that stay muted* skips confirmed deleted
+  stretches without waiting for the whole VOD check to finish (holding briefly
+  if an adjacent part is still pending so contiguous stretches skip in one jump).
+- **Skip-muted notification with *Undo*.** When *Skip parts that stay muted*
+  jumps forward, a brief pill (`Skipped 40:20 – 42:10 (still muted) · Undo`)
+  explains why playback jumped and lets you jump back in one click.
+- **Pin, *Save this VOD*, active-part highlight and `‹ Prev` / `Next ›` in the
+  panel.** Pin a VOD (`📌`), trigger a one-off full save even when global saving
+  is off or set to *"Parts ahead of me"*, see the currently playing muted range
+  highlighted in the list, and step between muted stretches. Panel height adapts
+  to short split-screen players, and Theatre / Fullscreen control rebuilds
+  re-mount the counter and seek bar immediately via `MutationObserver`.
+
+Saved audio, backups and auto-save:
+- **Backups keep `📌` pins and can include settings & auto-save channels.**
+  Importing a `.vodunmuter` file now preserves pinned VODs so automatic cleanup
+  never removes them, and backups can optionally export and restore your
+  settings and auto-save channel list.
+- **Clean up VODs Twitch already deleted.** The *Saved* tab checks saved VOD IDs
+  in batches, marks VODs that no longer exist on Twitch (`deleted on Twitch`),
+  and offers a one-click **Clean up** button for unpinned deleted VODs.
+- **Storage bar breakdown, search filter & offline compression.** The storage
+  bar distinguishes pinned vs. evictable space and warns when the browser's
+  origin quota is lower than your limit; a live filter appears when 6+ VODs are
+  saved; and **Compress lossless saves** on the backup page (or lowering *Saved
+  quality* in the menu) re-encodes older lossless saves offline with zero
+  network requests. WebCodecs AAC compression also falls back to raw
+  `mp4a.40.2` output wrapped in ADTS headers when native ADTS output isn't
+  supported.
+- **Faster, more resilient auto-save.** Channel checks are batched into
+  15-channel GraphQL queries instead of one request per channel, you can paste
+  multiple channel names or links at once, auto-save checks `/vod/v2/` with
+  HEVC/AV1 codecs enabled, and *Check now* pings open Twitch tabs to clear stale
+  locks if an earlier tab closed or hung.
+
+Behind the scenes:
+- **Bounded memory & hot-path optimizations.** Idle VOD maps (`playlists`,
+  `known`, `mp4Inits`, `renditions`, `segments`) are evicted on SPA navigation
+  and after auto-save runs; segment lookups use `O(1)` `job.byNum`; watched-part
+  deletions batch into a single IndexedDB transaction; MP4 `moof` fragments
+  write in one pass; MPEG-TS header parsing enforces strict 188-byte packet
+  bounds; and worker injection decodes binary `Uint8Array` `Blob`s without sync
+  XHR and supports `{ type: 'module' }` workers.
+- **Zero-dead-code build gate & new unit tests.** `node build.mjs` now fails on
+  unused imports, unreferenced top-level declarations, or unneeded module
+  exports across `src/` and `popup/`, alongside new unit tests covering mixed
+  `.mp4`↔`.ts` recovery, batched GQL auto-save, stale-lock recovery, playhead
+  scan priority, memory eviction, and backup/compression upgrades.
+
 ## 1.5.0
 ### 1.5.0 adds clickable muted segments, automatic skipping of unrecoverable muted audio, improved UI and accessibility, fixes VOD detection, and restores original audio in fragmented MP4 streams (HEVC/AV1), with enhanced diagnostics.
 In the player:

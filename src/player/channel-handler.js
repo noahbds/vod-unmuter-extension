@@ -5,7 +5,7 @@ import { channel, IS_PAGE, ORIGIN, post, RESTRICTED, saveMode, settings, TAB, up
 import { log, logLines } from '../shared/logger.js';
 import { aacSupported } from '../media/aac-compression.js';
 import { openDb } from '../storage/idb.js';
-import { deleteSavedVod, expireSaved, loadSavedNums, storageFull, updateVodInfo } from '../storage/saved-audio.js';
+import { deleteSavedVod, expireSaved, invalidateSavedTotal, loadSavedNums, storageFull, updateVodInfo } from '../storage/saved-audio.js';
 import { setResult } from '../recovery/probe-resolver.js';
 import { currentJob, isCurrent, jobs, reasonOf, scheduleResult, sendResult } from '../recovery/recovery-state.js';
 import { noteVodTotals } from '../recovery/scan-scheduler.js';
@@ -31,10 +31,13 @@ if (channel) {
         }
       }
     } else if (m.type === 'deleteSaved' && m.vodKey) {
+      invalidateSavedTotal();
       // Every instance forgets it; the page instance deletes it from disk.
       for (const job of jobs) {
         if (job.vodKey !== m.vodKey) continue;
         job.noSave = true; // don't save it again right away this session
+        job.forceSave = false;
+        job.pinned = false;
         job.saved.clear();
         job.savedBytes = 0;
         job.savedAt = null;
@@ -106,6 +109,7 @@ if (channel) {
         },
       });
     } else if (m.type === 'savedChanged' && m.vodKey) {
+      invalidateSavedTotal();
       // Audio was imported from a backup: use it for segments still muted.
       for (const job of jobs) {
         if (job.vodKey !== m.vodKey) continue;
@@ -118,12 +122,22 @@ if (channel) {
       for (const job of jobs) {
         if (job.vodKey !== m.vodKey) continue;
         job.noSave = false;
+        if (m.forceWhole) job.forceSave = true;
         job.savedAll = false;
       }
       for (const job of jobs) {
         if (job.vodKey !== m.vodKey || !isCurrent(job)) continue;
+        sendResult(job);
         maybeSaveAll(job);
       }
+    } else if ((m.type === 'pinSaved' || m.type === 'pinState') && m.vodKey) {
+      const pinned = !!m.pinned;
+      for (const job of jobs) if (job.vodKey === m.vodKey) job.pinned = pinned;
+      if (m.type === 'pinSaved' && IS_PAGE) {
+        await updateVodInfo(m.vodKey, { pinned });
+        try { scope.postMessage({ source: 'vod-unmuter-page', type: 'refreshSavedCache' }, ORIGIN || '*'); } catch (e) { /* ignore */ }
+      }
+      for (const job of jobs) if (job.vodKey === m.vodKey && job.finished) sendResult(job);
     }
   });
   post({ type: 'hello', where: WHERE });

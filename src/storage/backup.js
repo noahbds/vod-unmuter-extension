@@ -4,20 +4,23 @@ import { IS_PAGE, post } from '../shared/state.js';
 import { log } from '../shared/logger.js';
 import { audioRange, idb, recBytes, vodInfo } from './idb.js';
 import { clearGone } from './gone-cache.js';
-import { deleteSavedVod, expireSaved, listSaved, noteStorageFull, updateVodInfo } from './saved-audio.js';
+import { deleteSavedVod, deleteSavedVods, expireSaved, invalidateSavedTotal, listSaved, noteStorageFull, updateVodInfo } from './saved-audio.js';
+import { compressSaved } from '../recovery/save-compress-jobs.js';
 
 // ---- backup files ------------------------------------------------------
 // One file holds any number of saved VODs:
 //   "VODUNMUTER-BACKUP\n"  then a 4-byte little-endian header length,
 //   the header (JSON), then the raw audio bytes the header points to.
 // Binary fields of a record are written as { $bin: [offset, length] }.
-export const BACKUP_MAGIC = 'VODUNMUTER-BACKUP\n';
-export const BACKUP_FORMAT = 1;
-export const AUDIO_KEY_RE = /^([A-Za-z0-9_-]+)\|(\d+)$/;
+const BACKUP_MAGIC = 'VODUNMUTER-BACKUP\n';
+const BACKUP_FORMAT = 1;
+const AUDIO_KEY_RE = /^([A-Za-z0-9_-]+)\|(\d+)$/;
 
-export async function exportSaved(vodKeys) {
+export async function exportSaved(vodKeys, extra) {
   const vods = (await listSaved()).filter((v) => !vodKeys || vodKeys.includes(v.vod));
   const header = { format: BACKUP_FORMAT, app: 'Twitch VOD Unmuter', exported: Date.now(), vods, audio: [] };
+  if (extra && extra.settings && typeof extra.settings === 'object') header.settings = extra.settings;
+  if (extra && Array.isArray(extra.autoChannels)) header.autoChannels = extra.autoChannels;
   const blobs = [];
   let offset = 0;
   for (const v of vods) {
@@ -103,6 +106,7 @@ export async function importSaved(file, onProgress) {
               });
               if (meta.vodId && !info.vodId) info.vodId = meta.vodId;
               if (meta.title && !info.title) info.title = meta.title;
+              if (meta.pinned) info.pinned = true;
               if (meta.muted && !info.muted) { info.muted = meta.muted; info.restorable = meta.restorable || 0; }
               info.segments += add.segments;
               info.bytes += add.bytes;
@@ -142,6 +146,7 @@ export async function importSaved(file, onProgress) {
     for (const v of batchVods) result.vods.add(v);
     if (onProgress) onProgress(Math.min(i + BATCH, head.audio.length), head.audio.length);
   }
+  invalidateSavedTotal();
   for (const vod of result.vods) post({ type: 'savedChanged', vodKey: vod });
   log('info', `backup file read${Number.isFinite(head.exported) ? ` (made ${new Date(head.exported).toISOString().slice(0, 16).replace('T', ' ')} UTC)` : ''}: ${result.added} part(s) added, ` +
     `${(result.bytes / 1e6).toFixed(1)} MB, ${result.vods.size} VOD(s) · ${result.skipped} skipped (already saved here, or damaged entries)` +
@@ -154,8 +159,8 @@ export async function importSaved(file, onProgress) {
 // Only the page instance manages the database for the popup / UI.
 if (IS_PAGE) {
   scope.__vodUnmuterStore = {
-    list: listSaved, remove: deleteSavedVod, expire: expireSaved,
-    exportSaved, importSaved, readBackupHeader, clearGone,
+    list: listSaved, remove: deleteSavedVod, removeMany: deleteSavedVods, expire: expireSaved,
+    exportSaved, importSaved, readBackupHeader, clearGone, compressSaved,
     pin: (vod, pinned) => updateVodInfo(vod, { pinned: !!pinned }),
   };
 }

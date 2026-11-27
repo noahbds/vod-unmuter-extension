@@ -21,6 +21,12 @@ export const ui = {
   barsVersion: -1,
   lastSkippedStart: -1,    // start time of the last auto-skipped still-muted range
   manualSeekUntil: 0,      // brief cooldown after clicking a range row so auto-skip doesn't jump away
+  currentTime: 0,          // latest video.currentTime, for highlighting the active range
+  toast: null,             // skip-muted notification pill with Undo
+  toastTimer: 0,
+  observer: null,          // watches player DOM remounts (Theatre / Fullscreen)
+  observerTarget: null,
+  rafPending: false,
 };
 
 export function applyUiSettings(patch) {

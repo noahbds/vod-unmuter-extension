@@ -22,19 +22,35 @@ export function noteVodTotals(job) {
   };
   if (job.vodId) fields.vodId = job.vodId;
   if (job.title) fields.title = job.title;
+  if (job.channel) fields.channel = job.channel;
+  if (job.streamedAt) fields.streamedAt = job.streamedAt;
   updateVodInfo(job.vodKey, fields);
+}
+
+// Picks the next segment to check: once the initial spread sample is done,
+// segments at or ahead of the viewer's playhead come first, then wrap around.
+export function pickNextSegment(pool, position) {
+  if (!pool.length) return null;
+  if (position !== undefined && Number.isFinite(position)) {
+    const idx = pool.findIndex((s) => s.start + s.duration >= position);
+    if (idx >= 0) return pool.splice(idx, 1)[0];
+  }
+  return pool.shift();
 }
 
 // A small pool of workers, each finishing one segment before taking the next.
 // A paused job (a quality the player isn't playing) stops taking segments
 // and waits until it's played again.
 // `report` (optional) collects each part's result for the logs.
-export async function checkSegments(job, order, sample, report) {
-  let next = 0;
+async function checkSegments(job, order, sample, report) {
+  const sampleQueue = sample ? order.filter((s) => sample.has(s)) : [];
+  const restQueue = sample ? order.filter((s) => !sample.has(s)) : order.slice();
+  const take = () => (sampleQueue.length ? sampleQueue.shift() : pickNextSegment(restQueue, job.position));
   const worker = async () => {
-    while (next < order.length) {
+    for (;;) {
       if ((sample && job.skipRest) || job.paused) break;
-      const s = order[next++];
+      const s = take();
+      if (!s) break;
       try { await resolveSegment(s, report); } catch (e) { log('warn', `${jobName(job)}: checking ${partName(s)} failed, it stays muted for now`, e); }
       job.done++;
       if (s.source) job.found++;
@@ -50,7 +66,7 @@ export async function checkSegments(job, order, sample, report) {
   };
   for (;;) {
     await Promise.all(Array.from({ length: MAX_PARALLEL }, worker));
-    if (next >= order.length || (sample && job.skipRest) || !job.paused) break;
+    if ((!sampleQueue.length && !restQueue.length) || (sample && job.skipRest) || !job.paused) break;
     await new Promise((resolve) => { job.onResume = resolve; });
   }
   flushGone();
@@ -84,11 +100,13 @@ export async function checkAll(job) {
       if (info.behind) job.behind = info.behind;
       if (info.bytes) job.savedBytes = info.bytes;
       if (info.savedAt) job.savedAt = info.savedAt;
+      if (info.pinned) job.pinned = true;
     }
   } catch (e) { /* none */ }
   if (job.behind && saveMode() === 'unplayed' && !job.auto) dropBehind(job, []);
   const info = vodInfo(job.vodKey);
-  if (info.streamedAt) job.endedAt = info.streamedAt + job.total * 1000;
+  const streamedAt = job.streamedAt || info.streamedAt;
+  if (streamedAt) job.endedAt = streamedAt + job.total * 1000;
   sendState(job);
 
   // A sample spread over the whole VOD is checked first, for an early

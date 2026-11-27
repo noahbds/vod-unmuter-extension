@@ -1,7 +1,7 @@
 // Hook module (page and player worker): see src/hook.js.
 
-import { ALL_GONE_AFTER_H, PLAYING_MS, prettyQuality } from '../shared/constants.js';
-import { INSTANCE, IS_PAGE, post, settings } from '../shared/state.js';
+import { ALL_GONE_AFTER_H, parseVodKey, PLAYING_MS, prettyQuality } from '../shared/constants.js';
+import { dirExts, INSTANCE, IS_PAGE, known, mp4Dirs, mp4Inits, playlists, post, renditions, segments, settings, vodIdsByBase } from '../shared/state.js';
 import { aacSupported } from '../media/aac-compression.js';
 import { allDirs } from './probe-resolver.js';
 import { maybeSaveAll } from './save-compress-jobs.js';
@@ -79,13 +79,53 @@ export const jobs = [];
 // qualities of it are open).
 export const jobOf = (url) => jobs.find((j) => url.startsWith(j.vodBase));
 export let currentJob = null;
-export let noneCurrent = false; // the player moved to a VOD with nothing muted
+let noneCurrent = false; // the player moved to a VOD with nothing muted
 // In the player, a VOD whose playlist was just loaded counts as playing
 // until segments say otherwise. The page copy only sees playlists that
 // something else in the page fetched (e.g. another extension), so there a
 // VOD counts only once its video is really downloaded from the page.
 export const isCurrent = (job) => !job.auto &&
   (currentJob || (noneCurrent || IS_PAGE ? null : jobs.filter((j) => !j.auto).pop())) === job;
+
+const MAX_KEPT_VODS = 3;
+
+// Frees memory held for a VOD folder (playlists, known URLs, MP4 init buffers,
+// segment hooks, and idle jobs). Active saving/compressing jobs are never touched.
+export function evictVodState(vodBase, forceJob) {
+  if (!vodBase) return;
+  for (let i = jobs.length - 1; i >= 0; i--) {
+    const j = jobs[i];
+    if (j.vodBase !== vodBase) continue;
+    if (j !== forceJob && (!j.finished || j.saving || j.compressing || j === currentJob)) return;
+  }
+  for (let i = jobs.length - 1; i >= 0; i--) {
+    const j = jobs[i];
+    if (j.vodBase !== vodBase) continue;
+    clearTimeout(j.retryTimer);
+    clearTimeout(j.progressTimer);
+    clearTimeout(j.resultTimer);
+    clearTimeout(j.compressTimer);
+    clearTimeout(j.positionTimer);
+    for (const s of j.segs) segments.delete(s.urls['.ts']);
+    jobs.splice(i, 1);
+  }
+  for (const k of playlists.keys()) if (k.startsWith(vodBase)) playlists.delete(k);
+  for (const k of known.keys()) if (k.startsWith(vodBase)) known.delete(k);
+  for (const k of mp4Inits.keys()) if (k.startsWith(vodBase)) mp4Inits.delete(k);
+  for (const k of dirExts.keys()) if (k.startsWith(vodBase)) dirExts.delete(k);
+  renditions.delete(vodBase);
+  vodIdsByBase.delete(vodBase);
+  mp4Dirs.delete(vodBase);
+}
+
+function pruneOldVods() {
+  const seen = [];
+  for (let i = jobs.length - 1; i >= 0; i--) {
+    const b = jobs[i].vodBase;
+    if (b && !seen.includes(b)) seen.push(b);
+  }
+  for (const b of seen.slice(MAX_KEPT_VODS)) evictVodState(b);
+}
 
 // The player opened another VOD (Twitch changes pages without reloading).
 // `job` is that VOD's job, or null when it has nothing muted: tell the UI
@@ -96,6 +136,7 @@ export function switchVod(vodBase, job) {
   if (!before || before.vodBase === vodBase) return;
   post({ type: 'none', vod: before.vod, instance: INSTANCE });
   if (job) { makeCurrent(job); sendState(job); } else { currentJob = null; noneCurrent = true; }
+  pruneOldVods();
 }
 
 // `job` was dropped (Twitch unmuted its VOD): it isn't the current one any more.
@@ -150,10 +191,10 @@ export function sendResult(job, checking) {
       reasons: job.segs.reduce((m, x) => { const r = reasonOf(x); m[r] = (m[r] || 0) + 1; return m; }, {}),
       mp4: !!job.mp4,
       checkedQualities: allDirs(job).concat(allDirs(job).includes('audio_only') ? [] : ['audio_only']).map(prettyQuality),
-      channel: job.vodKey.split('_').slice(1, -2).join('_'), endedAt: job.endedAt || null, sampleSize: job.sample ? job.sample.size : 0,
+      channel: job.channel || parseVodKey(job.vodKey).channel, endedAt: job.endedAt || null, sampleSize: job.sample ? job.sample.size : 0,
       ranges: buildRanges(job.segs),
       save: {
-        enabled: !!settings.saveAudio, mode: settings.saveMode,
+        enabled: !!settings.saveAudio, mode: settings.saveMode, forced: !!job.forceSave, pinned: !!job.pinned,
         saved, savable: restored, active: job.saving,
         bytes: job.savedBytes, savedAt: job.savedAt, paused: job.noSave,
         quality: settings.saveQuality, aac: aacSupported, limitReached: !!job.limitReached, storageFull: !!job.storageFull, maxMB: Number(settings.maxStorageMB) || 0,
@@ -181,7 +222,7 @@ export function scheduleResult(job) {
 // The player now plays `job`: pause the checks of this VOD's other
 // qualities (each quality is a separate copy, so their checks are only
 // useful when played) and resume this one.
-export function makeCurrent(job) {
+function makeCurrent(job) {
   currentJob = job;
   noneCurrent = false;
   for (const j of jobs) if (j !== job && !j.auto && j.vodBase === job.vodBase) j.paused = true;

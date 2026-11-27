@@ -1,6 +1,6 @@
 // Hook module (page and player worker): see src/hook.js. Pure: no state, no browser APIs.
 
-import { adtsInfo, concat } from './adts-muxer.js';
+import { ADTS_RATES, adtsInfo, concat, wrapAdts } from './adts-muxer.js';
 
 // ------------------------------------------------------------ fragmented MP4
 // VODs streamed in HEVC/AV1 come as fragmented MP4: one "init-0.mp4" per
@@ -41,7 +41,7 @@ const hex = (bytes) => Array.from(bytes, (b) => b.toString(16).padStart(2, '0'))
 // AudioSpecificConfig in an esds box: ES_Descriptor (3) > DecoderConfig (4)
 // > DecoderSpecificInfo (5). Two qualities' sound can be swapped only if
 // these bytes match (same AAC profile, sample rate and channels).
-export function esdsConfig(buf, esds) {
+function esdsConfig(buf, esds) {
   let o = esds.body + 4; // version + flags
   const desc = () => {
     const tag = buf[o++];
@@ -220,7 +220,9 @@ const fullBox = (type, version, flags, parts) => mp4Box(type, [u32((version << 2
 
 // A traf with every sample written out (duration, size, flags, and the
 // composition offset if any): no dependence on defaults or base offsets.
-function writeTraf(t, dataOffset) {
+// Returns { box, patchAt } where `patchAt` is the byte offset of `data_offset`
+// inside `box`, so writePair builds the moof in a single pass.
+function writeTraf(t) {
   const hasCto = t.samples.some((s) => s.cto);
   const signed = t.samples.some((s) => s.cto < 0); // version 1: signed offsets
   const tfhd = fullBox('tfhd', 0, 0x20000 | (t.sdi !== null ? 0x2 : 0), [u32(t.trackId), ...(t.sdi !== null ? [u32(t.sdi)] : [])]);
@@ -230,20 +232,25 @@ function writeTraf(t, dataOffset) {
     per.push(u32(s.duration), u32(s.bytes.length), u32(s.flags));
     if (hasCto) { const b = new Uint8Array(4); if (signed) view(b).setInt32(0, s.cto); else view(b).setUint32(0, s.cto); per.push(b); }
   }
-  const trun = fullBox('trun', signed ? 1 : 0, 0x1 | 0x100 | 0x200 | 0x400 | (hasCto ? 0x800 : 0), [u32(t.samples.length), u32(dataOffset), ...per]);
-  return mp4Box('traf', [tfhd, tfdt, trun, ...t.others]);
+  const trun = fullBox('trun', signed ? 1 : 0, 0x1 | 0x100 | 0x200 | 0x400 | (hasCto ? 0x800 : 0), [u32(t.samples.length), u32(0), ...per]);
+  return { box: mp4Box('traf', [tfhd, tfdt, trun, ...t.others]), patchAt: 8 + tfhd.length + tfdt.length + 16 };
 }
 
-// moof + mdat for these trafs. The moof's size doesn't depend on the data
-// offsets, so it is written once to measure it, then for real.
+// moof + mdat for these trafs, written in one pass by patching each trun's
+// data_offset once the moof's total byte length is known.
 function writePair(others, trafs) {
-  const build = (offsets) => mp4Box('moof', [...others, ...trafs.map((t, i) => writeTraf(t, offsets[i]))]);
-  const moofSize = build(trafs.map(() => 0)).length;
-  const offsets = [];
-  let at = moofSize + 8;
-  for (const t of trafs) { offsets.push(at); at += t.samples.reduce((n, s) => n + s.bytes.length, 0); }
-  const data = trafs.flatMap((t) => t.samples.map((s) => s.bytes));
-  return concat([build(offsets), mp4Box('mdat', data)]);
+  const built = trafs.map(writeTraf);
+  const moof = mp4Box('moof', [...others, ...built.map((b) => b.box)]);
+  const dv = view(moof);
+  let boxStart = 8 + others.reduce((n, b) => n + b.length, 0);
+  let dataAt = moof.length + 8;
+  const data = [];
+  trafs.forEach((t, i) => {
+    dv.setInt32(boxStart + built[i].patchAt, dataAt);
+    boxStart += built[i].box.length;
+    for (const s of t.samples) { data.push(s.bytes); dataAt += s.bytes.length; }
+  });
+  return concat([moof, mp4Box('mdat', data)]);
 }
 
 // Keeps everything of `target` (video, metadata) but replaces its sound
@@ -308,15 +315,9 @@ export function mp4AudioToAdts(audio) {
   if (!audio || !audio.config || audio.config.length !== 4) return null;
   const asc = parseInt(audio.config, 16);
   const objectType = asc >> 11, rate = (asc >> 7) & 0xf, channels = (asc >> 3) & 0xf;
-  if (objectType < 1 || objectType > 4 || rate > 12 || channels > 7) return null;
-  return audio.samples.map((s) => {
-    const len = s.bytes.length + 7;
-    const f = new Uint8Array(len);
-    f.set([0xff, 0xf1, ((objectType - 1) << 6) | (rate << 2) | (channels >> 2),
-      ((channels & 3) << 6) | (len >> 11), (len >> 3) & 0xff, ((len & 7) << 5) | 0x1f, 0xfc]);
-    f.set(s.bytes, 7);
-    return f;
-  });
+  const sampleRate = ADTS_RATES[rate];
+  if (!sampleRate || objectType < 1 || objectType > 4 || channels < 1 || channels > 7) return null;
+  return audio.samples.map((s) => wrapAdts(s.bytes, sampleRate, channels, objectType));
 }
 
 // The AAC settings of an ADTS frame, written like an MP4 init file's ("1190").

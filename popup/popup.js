@@ -1,7 +1,6 @@
 const api = globalThis.browser || globalThis.chrome;
 const DEFAULTS = { enabled: true, badge: true, recolor: true, saveAudio: true, saveMode: 'whole', keepDays: 60, saveQuality: 'high', maxStorageMB: 1000, autoOpenTab: true, debug: false, notify: false, skipMuted: false };
 const NUMBERS = ['keepDays', 'maxStorageMB'];
-const TWITCH_TABS = ['https://www.twitch.tv/*', 'https://m.twitch.tv/*'];
 const $ = (id) => document.getElementById(id);
 
 const QUALITY_HELP = {
@@ -54,6 +53,7 @@ async function loadSettings() {
       if (el.hasAttribute('data-reload')) $('note').hidden = false;
       refreshDependents();
       if (NUMBERS.includes(key)) setTimeout(loadSaved, 300); // old saves may be removed
+      if (key === 'saveQuality' && value !== 'original') ask('compress', null, { quality: value }).then((r) => { if (r && r.vods) render(r); });
     });
   }
   // "Parts I play" was replaced by "Parts I haven't played".
@@ -68,10 +68,7 @@ async function loadSettings() {
 // Firefox has no AAC encoder: High and Small can't be made there.
 let aac = true;
 (async () => {
-  try {
-    aac = typeof AudioEncoder === 'function' && !!(await AudioEncoder.isConfigSupported({
-      codec: 'mp4a.40.2', sampleRate: 48000, numberOfChannels: 2, bitrate: 96000, aac: { format: 'adts' } })).supported;
-  } catch (e) { aac = false; }
+  aac = await checkAacSupport();
   await settingsLoaded;
   if (!aac) {
     // High and Small can't be made here: use Original, and say why.
@@ -118,7 +115,6 @@ async function ask(action, vodKey, extra) {
 }
 
 const mb = (bytes) => `${(bytes / 1e6).toFixed(bytes < 1e7 ? 1 : 0)} MB`;
-const day = (t) => new Date(t).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
 
 function el(tag, attrs, ...children) {
   const node = document.createElement(tag);
@@ -130,6 +126,36 @@ function el(tag, attrs, ...children) {
 }
 
 const BACKUP_URL = 'https://www.twitch.tv/robots.txt#vod-unmuter-backup';
+const sessionStore = api.storage.session || api.storage.local;
+let lastReply = null;
+let deletedVodIds = new Set();
+
+async function checkDeletedVods(vods) {
+  const ids = [...new Set((vods || []).map((v) => v.vodId).filter(Boolean))];
+  if (!ids.length) return;
+  try {
+    const { deletedVodCache } = await sessionStore.get({ deletedVodCache: null });
+    if (deletedVodCache && Date.now() - deletedVodCache.at < 15 * 60 * 1000 &&
+        ids.every((id) => deletedVodCache.checked.includes(id))) {
+      deletedVodIds = new Set(deletedVodCache.missing);
+      return;
+    }
+    const missing = [];
+    for (let i = 0; i < ids.length; i += 30) {
+      const chunk = ids.slice(i, i + 30);
+      const r = await fetch('https://gql.twitch.tv/gql', {
+        method: 'POST', headers: { 'Client-ID': TWITCH_CLIENT_ID },
+        body: JSON.stringify({ query: `query($ids: [ID!]!) { videos(ids: $ids) { id } }`, variables: { ids: chunk } }),
+      });
+      if (!r.ok) return;
+      const body = await r.json();
+      const alive = new Set(((body && body.data && body.data.videos) || []).filter(Boolean).map((v) => String(v.id)));
+      for (const id of chunk) if (!alive.has(String(id))) missing.push(String(id));
+    }
+    deletedVodIds = new Set(missing);
+    await sessionStore.set({ deletedVodCache: { at: Date.now(), checked: ids, missing } });
+  } catch (e) { /* offline: skip */ }
+}
 
 // One line per VOD: "18 nov. · 94 / 108 parts · 19 MB", plus why the rest
 // isn't saved when that's known.
@@ -138,50 +164,97 @@ function vodLines(v) {
   const parts = v.muted ? `${v.segments} / ${v.muted} parts` : `${v.segments} parts`;
   const main = `${v.streamedAt ? shortDay(v.streamedAt) : '?'} · ${parts} · ${mb(v.bytes)}`;
   const why = [];
+  if (v.vodId && deletedVodIds.has(String(v.vodId))) why.push('deleted on Twitch');
   if (v.muted) {
     const before = v.muted - (v.restorable || 0);
     const notYet = (v.restorable || 0) - v.segments;
     if (before > 0) why.push(`${before} deleted by Twitch before saving`);
     if (notYet > 0) why.push(`${notYet} not saved yet`);
   }
-  const url = v.vodId ? `https://www.twitch.tv/videos/${encodeURIComponent(v.vodId)}` : null;
+  const url = v.vodId && !deletedVodIds.has(String(v.vodId)) ? `https://www.twitch.tv/videos/${encodeURIComponent(v.vodId)}` : null;
   return { main, why: why.join(' · '), title: v.title || '', url };
 }
 
 function render(reply) {
+  lastReply = reply;
   const box = $('saved');
   const storage = $('storage');
+  const deadBox = $('deadNotice');
   box.replaceChildren();
   storage.replaceChildren();
+  deadBox.replaceChildren();
+  deadBox.hidden = true;
   $('deleteAll').hidden = true;
   $('savedCount').textContent = '';
   const readOnly = !!reply.cached;
 
   if (reply.noTab && !reply.cached) {
-    box.append(el('p', { class: 'muted' }, 'Open www.twitch.tv in a tab to see and manage saved audio.'));
+    $('savedFilter').hidden = true;
+    box.append(el('p', { class: 'muted' }, 'Open www.twitch.tv in a tab to see and manage saved audio. '),
+      el('button', { type: 'button', onclick: () => { api.tabs.create({ url: BACKUP_URL }); window.close(); } }, 'Open manager on Twitch ↗'));
     return;
   }
   if (reply.error) {
+    $('savedFilter').hidden = true;
     box.append(el('p', { class: 'muted' }, 'Could not reach the Twitch tab. Reload it and try again.'));
     return;
   }
-  const vods = (reply.vods || []).sort((a, b) => b.savedAt - a.savedAt);
-  $('savedCount').textContent = vods.length ? String(vods.length) : '';
+  const allVods = (reply.vods || []).sort((a, b) => b.savedAt - a.savedAt);
+  $('savedCount').textContent = allVods.length ? String(allVods.length) : '';
+  $('savedFilter').hidden = allVods.length < 6;
 
-  const total = vods.reduce((n, v) => n + v.bytes, 0);
+  const total = allVods.reduce((n, v) => n + v.bytes, 0);
+  const pinnedBytes = allVods.filter((v) => v.pinned).reduce((n, v) => n + v.bytes, 0);
   const limit = Number($('maxStorageMB').value) * 1e6;
   const pct = limit ? Math.min(100, Math.round((total / limit) * 100)) : 0;
+  const pinnedPct = limit ? Math.min(100, Math.round((pinnedBytes / limit) * 100)) : 0;
+  const freePct = Math.max(0, pct - pinnedPct);
+  const quotaBytes = Number(reply.quota) || 0;
   storage.append(
     el('div', { class: 'line' },
-      el('span', null, el('b', null, mb(total)), ` · ${vods.length} VOD${vods.length === 1 ? '' : 's'}`),
+      el('span', null, el('b', null, mb(total)), ` · ${allVods.length} VOD${allVods.length === 1 ? '' : 's'}`,
+        pinnedBytes > 0 ? ` (${mb(pinnedBytes)} pinned)` : ''),
       el('span', null, limit ? `limit ${limit >= 1e9 ? limit / 1e9 + ' GB' : mb(limit)}` : 'no limit')),
-    limit ? el('div', { class: 'meter', role: 'img', 'aria-label': `${pct}% of the storage limit used` }, el('div', { style: `width:${pct}%` })) : null);
-  if (readOnly) box.append(el('p', { class: 'cached' }, `As of ${new Date(reply.at).toLocaleString()}. Open a www.twitch.tv tab to delete, pin or export.`));
+    limit ? el('div', { class: 'meter', role: 'img', 'aria-label': `${pct}% of the storage limit used` },
+      pinnedPct ? el('div', { class: 'pinned-fill', style: `width:${pinnedPct}%`, title: `Pinned: ${mb(pinnedBytes)}` }) : null,
+      freePct ? el('div', { class: 'evictable-fill', style: `width:${freePct}%` }) : null) : null,
+    quotaBytes > 0 && (limit === 0 || quotaBytes < limit) && quotaBytes - total < 200e6
+      ? el('small', { class: 'note' }, `Browser storage quota here is ${mb(quotaBytes)}.`) : null);
+  if (readOnly) {
+    box.append(el('p', { class: 'cached' },
+      `As of ${new Date(reply.at).toLocaleString()}. Open a www.twitch.tv tab to delete, pin or export. `,
+      el('button', { type: 'button', class: 'link', style: 'color:var(--saved)', onclick: () => { api.tabs.create({ url: BACKUP_URL }); window.close(); } }, 'Manage ↗')));
+  }
 
-  if (!vods.length) {
+  if (!allVods.length) {
     box.append(el('p', { class: 'muted' }, $('saveAudio').checked
       ? 'Nothing saved yet. Open a VOD within a day of the stream and its muted parts are saved automatically.'
       : 'Nothing saved.'));
+    return;
+  }
+
+  if (!readOnly) {
+    const deadUnpinned = allVods.filter((v) => !v.pinned && v.vodId && deletedVodIds.has(String(v.vodId)));
+    if (deadUnpinned.length) {
+      const deadBytes = deadUnpinned.reduce((n, v) => n + v.bytes, 0);
+      deadBox.hidden = false;
+      deadBox.append(
+        el('small', { class: 'muted' }, `${deadUnpinned.length} VOD${deadUnpinned.length > 1 ? 's' : ''} deleted on Twitch (${mb(deadBytes)})`),
+        el('button', {
+          type: 'button', onclick: async () => {
+            render(await ask('deleteBatch', null, { vodKeys: deadUnpinned.map((v) => v.vod) }));
+          },
+        }, 'Clean up'));
+    }
+  }
+
+  const q = String($('savedFilter').value || '').trim().toLowerCase();
+  const vods = q
+    ? allVods.filter((v) => String(v.channel || '').toLowerCase().includes(q) || String(v.title || '').toLowerCase().includes(q))
+    : allVods;
+  if (!vods.length) {
+    box.append(el('p', { class: 'muted' }, `No saved VOD matching "${$('savedFilter').value}".`));
+    $('deleteAll').hidden = readOnly;
     return;
   }
 
@@ -238,13 +311,25 @@ function render(reply) {
   $('deleteAll').hidden = readOnly;
 }
 
+$('savedFilter').addEventListener('input', () => { if (lastReply) render(lastReply); });
+
 async function loadSaved() {
   const reply = await ask('list');
   if (reply.noTab) {
     const { savedCache } = await api.storage.local.get({ savedCache: null });
-    if (savedCache) return render(Object.assign({ cached: true }, savedCache));
+    if (savedCache) {
+      const cached = Object.assign({ cached: true }, savedCache);
+      render(cached);
+      await checkDeletedVods(cached.vods);
+      if (deletedVodIds.size) render(cached);
+      return;
+    }
   }
   render(reply);
+  if (reply && Array.isArray(reply.vods) && reply.vods.length) {
+    await checkDeletedVods(reply.vods);
+    if (deletedVodIds.size) render(reply);
+  }
 }
 
 $('deleteAll').addEventListener('click', async () => {
@@ -254,7 +339,7 @@ $('deleteAll').addEventListener('click', async () => {
 
 // Export / import happen on a twitch.tv page, where the saved audio lives.
 $('backup').addEventListener('click', () => {
-  api.tabs.create({ url: 'https://www.twitch.tv/robots.txt#vod-unmuter-backup' });
+  api.tabs.create({ url: BACKUP_URL });
   window.close();
 });
 

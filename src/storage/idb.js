@@ -1,12 +1,13 @@
 // Hook module (page and player worker): see src/hook.js.
 
+import { parseVodKey } from '../shared/constants.js';
 import { log } from '../shared/logger.js';
 
 // ------------------------------------------------------------ saved audio
 // IndexedDB for twitch.tv, shared by the page and the player worker.
 //   audio: "<vod folder>|<segment number>" -> { type, pts, packets }
 //   vods:  { vod, channel, streamedAt, savedAt, segments, bytes }
-export let dbPromise = null;
+let dbPromise = null;
 export function openDb() {
   if (!dbPromise) {
     dbPromise = new Promise((resolve, reject) => {
@@ -36,15 +37,7 @@ export async function idb(stores, mode, work) {
 
 export const audioRange = (vod) => IDBKeyRange.bound(vod + '|', vod + '|\uffff');
 
-export function vodInfo(vod) {
-  // Twitch folders look like "<hash>_<channel>_<stream id>_<unix time>".
-  const parts = vod.split('_');
-  const time = Number(parts[parts.length - 1]);
-  return {
-    channel: parts.length >= 4 ? parts.slice(1, -2).join('_') : '',
-    streamedAt: time > 1e9 ? time * 1000 : null,
-  };
-}
+export const vodInfo = parseVodKey;
 
 // ---- deleted originals ---------------------------------------------------
 // Once Twitch deletes an original file it never comes back, so every
@@ -53,8 +46,8 @@ export function vodInfo(vod) {
 // so the saved-audio one never needs an upgrade.
 //   gone: { vod, updated, files: { "<quality>/<suffix>": [segment numbers] } }
 
-export let goneDbPromise = null;
-export function openGoneDb() {
+let goneDbPromise = null;
+function openGoneDb() {
   if (!goneDbPromise) {
     goneDbPromise = new Promise((resolve, reject) => {
       const req = scope.indexedDB.open('vod-unmuter-gone', 1);

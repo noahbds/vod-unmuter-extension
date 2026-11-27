@@ -36,7 +36,7 @@ const UI = 'src/ui.js';
 // sent to the player worker).
 const PAGE_ONLY = ['storage/backup.js', 'recovery/auto-save.js', 'player/worker-injection.js', 'messaging/page-bridge.js'];
 // What the page exposes, used by ui.js, bridge.js (through the page) and the tests.
-const STORE_API = ['list', 'remove', 'expire', 'exportSaved', 'importSaved', 'readBackupHeader', 'clearGone', 'pin'];
+const STORE_API = ['list', 'remove', 'removeMany', 'expire', 'exportSaved', 'importSaved', 'readBackupHeader', 'clearGone', 'compressSaved', 'pin'];
 const DEBUG_API = ['jobs', 'renditions', 'scanTs', 'extractAudio', 'spliceAudio', 'listSaved', 'loadRecord', 'recordToAudio', 'muxAdts', 'splitAdts', 'packetsToAdts', 'encoderDelay'];
 
 const readText = (rel) => fs.readFileSync(path.join(ROOT, rel), 'utf8');
@@ -230,6 +230,7 @@ function scanJs(code) {
   return ids;
 }
 const isPunc = (t, ...v) => !!t && t.type === 'punc' && v.includes(t.value);
+const isMember = (t) => isPunc(t.prev, '.') && !isPunc(t.prev2, '.');
 
 function topLevelDecls(ids) {
   return ids.filter((t) => t.depth === 0 && t.prev && t.prev.type === 'id' &&
@@ -237,7 +238,7 @@ function topLevelDecls(ids) {
 }
 
 function usedNames(ids) {
-  return new Set(ids.filter((t) => !isPunc(t.prev, '.') && !(isPunc(t.next, ':') && isPunc(t.prev, '{', ','))).map((t) => t.name));
+  return new Set(ids.filter((t) => !isMember(t) && !(isPunc(t.next, ':') && isPunc(t.prev, '{', ','))).map((t) => t.name));
 }
 
 // `name = …`, `name += …`, `name++`, `++name` (not `==`, `=>`, `obj.name = …`).
@@ -250,21 +251,66 @@ function assignedNames(ids) {
   )).map((t) => t.name));
 }
 
-// ---------------------------------------------------------------- hook.js
+// ---------------------------------------------------------------- assembly
 const IMPORT_RE = /^import\s*\{([^}]*)\}\s*from\s*'([^']+)';[ \t]*\n/gm;
+const EXPORT_DECL_RE = /^export (?:async function|function|const|let|class)\s+([A-Za-z_$][\w$]*)/gm;
 
 function readModule(rel) {
   const file = 'src/' + rel;
-  if (!fs.existsSync(path.join(ROOT, file))) throw new Error(`${HOOK} includes ${rel}, but ${file} doesn't exist`);
+  if (!fs.existsSync(path.join(ROOT, file))) throw new Error(`missing module ${file}`);
   const text = readText(file);
   const imports = [...text.matchAll(IMPORT_RE)].map((m) => ({
     names: m[1].split(',').map((s) => s.trim()).filter(Boolean),
     from: path.posix.normalize(path.posix.join(path.posix.dirname(rel), m[2])),
   }));
-  const body = text.replace(IMPORT_RE, '').replace(/^export (?=(async function|function|const|let|class) )/gm, '');
-  if (/^\s*(import|export)\b/m.test(body)) throw new Error(`${file}: an import/export the build can't handle (use "import { a, b } from './x.js';" and "export function/const/let …")`);
-  const ids = scanJs(text.replace(IMPORT_RE, ''));
-  return { rel, file, body: body.replace(/^\n+/, '').replace(/\n{3,}/g, '\n\n').replace(/\s+$/, ''), imports, ids, decls: topLevelDecls(ids) };
+  const exported = [...text.matchAll(EXPORT_DECL_RE)].map((m) => m[1]);
+  const stripped = text.replace(IMPORT_RE, '');
+  const body = stripped.replace(/^export (?=(async function|function|const|let|class) )/gm, '');
+  if (/^\s*(import|export)\b/m.test(body)) throw new Error(`${file}: unsupported import/export syntax`);
+  const ids = scanJs(stripped);
+  return { rel, file, raw: text, body: body.replace(/^\n+/, '').replace(/\n{3,}/g, '\n\n').replace(/\s+$/, ''), imports, exported, ids, decls: topLevelDecls(ids) };
+}
+
+function verifyModuleGraph(entryFile, allMods, sharedMods, problems, allowImportMod) {
+  const owner = new Map();
+  for (const m of sharedMods) {
+    for (const d of m.decls) {
+      if (owner.has(d)) problems.push(`"${d}" is declared in both ${owner.get(d).file} and ${m.file}`);
+      else owner.set(d, m);
+    }
+  }
+  for (const m of allMods.values()) {
+    if (m.inside === false && m.imports.length) problems.push(`${m.file}: runs outside installUnmuteHook, so it can't import from the hook's modules`);
+    const imported = new Set();
+    const used = usedNames(m.ids);
+    for (const imp of m.imports) {
+      const from = allMods.get(imp.from);
+      if (!from || (allowImportMod && !allowImportMod(from))) { problems.push(`${m.file}: imports from ${imp.from}, which isn't a shared module of ${entryFile}`); continue; }
+      if (from.pageOnly && !m.pageOnly) problems.push(`${m.file}: runs in the player worker too, but imports from the page-only ${from.file}`);
+      for (const name of imp.names) {
+        imported.add(name);
+        if (!from.decls.includes(name)) problems.push(`${m.file}: imports "${name}", which ${from.file} doesn't declare`);
+        else if (!used.has(name)) problems.push(`${m.file}: imports "${name}" without using it`);
+      }
+    }
+    if (m.inside === false) continue;
+    for (const name of used) {
+      const o = owner.get(name);
+      if (o && o !== m && !imported.has(name)) problems.push(`${m.file}: uses "${name}" from ${o.file} without importing it`);
+    }
+    for (const name of assignedNames(m.ids)) {
+      if (imported.has(name)) problems.push(`${m.file}: assigns "${name}", which belongs to ${owner.get(name).file} (change it there)`);
+    }
+  }
+}
+
+function renderTemplate(template, mods) {
+  return template.split('\n').map((line) => {
+    const m = line.match(/^(\s*)\/\/ @include (\S+)$/);
+    if (!m) return line;
+    const mod = mods.get(m[2]);
+    return [`${m[1]}// ---- src/${mod.rel} ----`].concat(mod.body.split('\n').map((l) => (l ? m[1] + l : l))).join('\n');
+  }).join('\n');
 }
 
 // Builds dist's src/hook.js from the template and its modules, after checking
@@ -272,7 +318,7 @@ function readModule(rel) {
 export function assembleHook() {
   const template = readText(HOOK);
   const problems = [];
-  const includes = []; // { rel, inside: in installUnmuteHook?, pageOnly }
+  const includes = [];
   let inHook = false, pageOnly = false;
   for (const line of template.split('\n')) {
     if (/^\s*function installUnmuteHook\(scope\) \{$/.test(line)) inHook = true;
@@ -285,7 +331,6 @@ export function assembleHook() {
   if ((template.match(/\/\* vu:page-only:start \*\//g) || []).length !== 1 || (template.match(/\/\* vu:page-only:end \*\//g) || []).length !== 1) {
     problems.push(`${HOOK}: needs exactly one /* vu:page-only:start */ … /* vu:page-only:end */ region`);
   }
-
   const mods = new Map();
   for (const inc of includes) {
     if (mods.has(inc.rel)) { problems.push(`${HOOK}: ${inc.rel} is included twice`); continue; }
@@ -299,102 +344,70 @@ export function assembleHook() {
       problems.push(`${m.file}: ${PAGE_ONLY.includes(m.rel) ? 'page-only module outside the page-only parts' : 'included in a page-only part but not listed in PAGE_ONLY'} of ${HOOK}`);
     }
   }
-
-  // The modules inside installUnmuteHook share one scope: each name is
-  // declared once, imports point at real declarations, and every name a
-  // module takes from another is imported (so each file says what it needs).
-  const inner = [...mods.values()].filter((m) => m.inside);
-  const owner = new Map();
-  for (const m of inner) {
-    for (const d of m.decls) {
-      if (owner.has(d)) problems.push(`"${d}" is declared in both ${owner.get(d).file} and ${m.file}`);
-      else owner.set(d, m);
-    }
-  }
-  for (const m of mods.values()) {
-    if (!m.inside && m.imports.length) problems.push(`${m.file}: runs outside installUnmuteHook, so it can't import from the hook's modules`);
-    const imported = new Set();
-    for (const imp of m.imports) {
-      const from = mods.get(imp.from);
-      if (!from || !from.inside) { problems.push(`${m.file}: imports from ${imp.from}, which isn't a module of installUnmuteHook`); continue; }
-      if (from.pageOnly && !m.pageOnly) problems.push(`${m.file}: runs in the player worker too, but imports from the page-only ${from.file}`);
-      for (const name of imp.names) {
-        imported.add(name);
-        if (!from.decls.includes(name)) problems.push(`${m.file}: imports "${name}", which ${from.file} doesn't declare`);
-      }
-    }
-    if (!m.inside) continue;
-    for (const name of usedNames(m.ids)) {
-      const o = owner.get(name);
-      if (o && o !== m && !imported.has(name)) problems.push(`${m.file}: uses "${name}" from ${o.file} without importing it`);
-    }
-    for (const name of assignedNames(m.ids)) {
-      if (imported.has(name)) problems.push(`${m.file}: assigns "${name}", which belongs to ${owner.get(name).file} (change it there)`);
-    }
-  }
+  verifyModuleGraph(HOOK, mods, [...mods.values()].filter((m) => m.inside), problems, (from) => from.inside);
   if (problems.length) throw new Error(problems.join('\n'));
-
-  const code = template.split('\n').map((line) => {
-    const m = line.match(/^(\s*)\/\/ @include (\S+)$/);
-    if (!m) return line;
-    const mod = mods.get(m[2]);
-    return [`${m[1]}// ---- src/${mod.rel} ----`].concat(mod.body.split('\n').map((l) => (l ? m[1] + l : l))).join('\n');
-  }).join('\n');
-  return { code, modules: [...mods.values()] };
+  return { code: renderTemplate(template, mods), modules: [...mods.values()] };
 }
 
-// Builds dist's src/ui.js from the template and its src/ui/*.js modules, after
-// checking that imports, top-level declarations and assignments fit together.
+// Builds dist's src/ui.js from the template and its src/ui/*.js modules.
 export function assembleUi() {
   const template = readText(UI);
   const problems = [];
-  const includes = [];
+  const mods = new Map();
   for (const line of template.split('\n')) {
     const m = line.match(/^\s*\/\/ @include (\S+)$/);
-    if (m) includes.push(m[1]);
-  }
-  const mods = new Map();
-  for (const rel of includes) {
-    if (mods.has(rel)) { problems.push(`${UI}: ${rel} is included twice`); continue; }
-    mods.set(rel, readModule(rel));
+    if (!m) continue;
+    if (mods.has(m[1])) problems.push(`${UI}: ${m[1]} is included twice`);
+    else mods.set(m[1], readModule(m[1]));
   }
   for (const rel of sourceFiles().filter(isUiModule).map((f) => f.slice(4))) {
     if (rel.endsWith('.js') && !mods.has(rel)) problems.push(`src/${rel} is not included by ${UI}`);
   }
-  const owner = new Map();
-  for (const m of mods.values()) {
-    for (const d of m.decls) {
-      if (owner.has(d)) problems.push(`"${d}" is declared in both ${owner.get(d).file} and ${m.file}`);
-      else owner.set(d, m);
+  verifyModuleGraph(UI, mods, [...mods.values()], problems);
+  if (problems.length) throw new Error(problems.join('\n'));
+  return { code: renderTemplate(template, mods), modules: [...mods.values()] };
+}
+
+// Fails the build if any top-level symbol is never referenced, or if any
+// module exports a symbol that no other module, entry template, or test uses.
+function checkNoDeadCode(hookCode, hookModules, uiCode, uiModules) {
+  const problems = [];
+  const countRefs = (ids) => {
+    const counts = new Map();
+    for (const t of ids) {
+      if (isMember(t) || (isPunc(t.next, ':') && isPunc(t.prev, '{', ','))) continue;
+      counts.set(t.name, (counts.get(t.name) || 0) + 1);
     }
-  }
-  for (const m of mods.values()) {
-    const imported = new Set();
-    for (const imp of m.imports) {
-      const from = mods.get(imp.from);
-      if (!from) { problems.push(`${m.file}: imports from ${imp.from}, which isn't a module of ${UI}`); continue; }
-      for (const name of imp.names) {
-        imported.add(name);
-        if (!from.decls.includes(name)) problems.push(`${m.file}: imports "${name}", which ${from.file} doesn't declare`);
+    return counts;
+  };
+  for (const [bundleCode, mods] of [[hookCode, hookModules], [uiCode, uiModules]]) {
+    const counts = countRefs(scanJs(bundleCode));
+    for (const m of mods) {
+      for (const d of m.decls) {
+        if ((counts.get(d) || 0) <= 1) problems.push(`${m.file}: "${d}" is declared at top level and never used`);
       }
     }
-    for (const name of usedNames(m.ids)) {
-      const o = owner.get(name);
-      if (o && o !== m && !imported.has(name)) problems.push(`${m.file}: uses "${name}" from ${o.file} without importing it`);
+  }
+  for (const rel of ['src/background.js', 'src/bridge.js', 'popup/popup.js', 'popup/welcome.js', 'popup/channel-form.js']) {
+    const ids = scanJs(readText(rel));
+    const counts = countRefs(ids);
+    for (const d of topLevelDecls(ids)) {
+      if ((counts.get(d) || 0) <= 1) problems.push(`${rel}: "${d}" is declared at top level and never used`);
     }
-    for (const name of assignedNames(m.ids)) {
-      if (imported.has(name)) problems.push(`${m.file}: assigns "${name}", which belongs to ${owner.get(name).file} (change it there)`);
+  }
+  const testDir = path.join(ROOT, 'test', 'unit');
+  const testText = fs.existsSync(testDir)
+    ? listFiles(testDir).filter((f) => f.endsWith('.mjs')).map((f) => fs.readFileSync(f, 'utf8')).join('\n')
+    : '';
+  const allModules = hookModules.concat(uiModules);
+  const templatesText = readText(HOOK) + '\n' + readText(UI) + '\n' + testText;
+  for (const m of allModules) {
+    const others = allModules.filter((o) => o !== m).map((o) => o.raw).join('\n') + '\n' + templatesText;
+    for (const exp of m.exported) {
+      if (!new RegExp(`\\b${exp}\\b`).test(others)) problems.push(`${m.file}: exports "${exp}", which nothing outside ${m.file} uses`);
     }
   }
   if (problems.length) throw new Error(problems.join('\n'));
-
-  const code = template.split('\n').map((line) => {
-    const m = line.match(/^(\s*)\/\/ @include (\S+)$/);
-    if (!m) return line;
-    const mod = mods.get(m[2]);
-    return [`${m[1]}// ---- src/${mod.rel} ----`].concat(mod.body.split('\n').map((l) => (l ? m[1] + l : l))).join('\n');
-  }).join('\n');
-  return { code, modules: [...mods.values()] };
 }
 
 // ---------------------------------------------------------------- sandbox
@@ -580,6 +593,7 @@ async function main() {
   const base = checkSources();
   const { code: hookCode, modules: hookModules } = assembleHook();
   const { code: uiCode, modules: uiModules } = assembleUi();
+  checkNoDeadCode(hookCode, hookModules, uiCode, uiModules);
   checkSyntax(sourceFiles().filter((f) => !isSubModule(f)), hookCode, uiCode);
   await sandboxCheck(hookCode);
   await uiSandboxCheck(uiCode);

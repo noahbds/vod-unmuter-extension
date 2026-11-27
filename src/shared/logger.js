@@ -15,7 +15,7 @@ import { settings, WHERE } from './state.js';
 // are, so they can be expanded there (an error shows its stack). Filter the
 // console with "VOD Unmuter" to see only these lines. Chrome shows debug
 // lines only with "Verbose" ticked in the console's levels menu.
-export const LOG_KEEP = 150;
+const LOG_KEEP = 150;
 export const logLines = [];
 export const shortUrl = (text) => String(text).replace(/https?:\/\/[^\s"']+/g, (u) => {
   const path = u.split(/[?#]/)[0].split('/').filter(Boolean);
@@ -26,8 +26,8 @@ export const describeArg = (a) => {
   if (a && typeof a === 'object') { try { return JSON.stringify(a); } catch (e) { return String(a); } }
   return String(a);
 };
-export const BADGE_CSS = 'color:#fff;background:#9146ff;border-radius:3px;padding:0 4px;font-weight:600';
-export const WHERE_CSS = 'color:#9146ff;font-weight:600';
+const BADGE_CSS = 'color:#fff;background:#9146ff;border-radius:3px;padding:0 4px;font-weight:600';
+const WHERE_CSS = 'color:#9146ff;font-weight:600';
 // %s, not the text itself, in the format: a "%" in the text stays as it is.
 const styled = (where, text, level) => [`%c${TAG}%c %s%c %s`, BADGE_CSS, WHERE_CSS, where, level === 'debug' ? 'color:#888' : '', text];
 

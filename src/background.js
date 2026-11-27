@@ -79,28 +79,48 @@ async function gql(query) {
   return r.json();
 }
 
+const GQL_BATCH = 15;
+
 // VODs of the auto-save channels that may still have originals to save.
 async function findWork(channels, state, force) {
   const now = Date.now();
   const work = [];
-  for (const login of channels) {
-    const ch = state.channels[login] || (state.channels[login] = {});
+  for (let start = 0; start < channels.length; start += GQL_BATCH) {
+    const batch = channels.slice(start, start + GQL_BATCH);
+    let data = null, batchErr = null;
     try {
-      const r = await gql(`query { user(login: ${JSON.stringify(login)}) {
-        displayName videos(first: 5, type: ARCHIVE, sort: TIME) { edges { node { id title createdAt lengthSeconds status } } } } }`);
-      const user = r.data && r.data.user;
-      if (!user) throw new Error('channel not found');
-      ch.name = user.displayName || login;
+      const fields = batch.map((login, idx) =>
+        `c${idx}: user(login: ${JSON.stringify(login)}) { displayName videos(first: 5, type: ARCHIVE, sort: TIME) { edges { node { id title createdAt lengthSeconds status } } } }`
+      ).join('\n');
+      const r = await gql(`query {\n${fields}\n}`);
+      data = r && r.data;
+    } catch (e) {
+      batchErr = e.message || String(e);
+    }
+    batch.forEach((login, idx) => {
+      const ch = state.channels[login] || (state.channels[login] = {});
       ch.lastCheck = now;
+      if (batchErr) {
+        ch.error = batchErr;
+        log('warn', `${login}: could not list the channel's VODs on Twitch: ${ch.error} (the menu shows it; tried again next run)`);
+        return;
+      }
+      const user = data && data['c' + idx];
+      if (!user) {
+        ch.error = 'channel not found';
+        log('warn', `${login}: could not list the channel's VODs on Twitch: ${ch.error} (the menu shows it; tried again next run)`);
+        return;
+      }
+      ch.name = user.displayName || login;
       ch.error = null;
       const notes = [];
-      for (const { node: v } of user.videos.edges) {
+      for (const { node: v } of (user.videos && user.videos.edges) || []) {
         const live = v.status === 'RECORDING';
         const endedAt = new Date(v.createdAt).getTime() + v.lengthSeconds * 1000;
         const what = `VOD ${v.id} (${live ? 'still live' : 'ended ' + hoursAgo(endedAt)})`;
         if (!live && now - endedAt > WINDOW_HOURS * 36e5) continue;
         const rec = state.vods[v.id] || (state.vods[v.id] = { channel: login, createdAt: v.createdAt });
-        Object.assign(rec, { title: v.title, live, endedAt: live ? null : endedAt });
+        Object.assign(rec, { channel: login, createdAt: v.createdAt, title: v.title, live, endedAt: live ? null : endedAt });
         if (rec.done) { notes.push(`${what}: done (${rec.saved || 0}/${rec.restorable || 0} saved)`); continue; }
         if (!force && rec.lastRun && now - rec.lastRun < RETRY_MINUTES * 6e4) { notes.push(`${what}: tried ${hoursAgo(rec.lastRun)}, again after ${RETRY_MINUTES} min`); continue; }
         if (!force && rec.retryAfter && now < rec.retryAfter) { notes.push(`${what}: ${rec.error || 'failed'}, retried at ${new Date(rec.retryAfter).toLocaleTimeString()}`); continue; }
@@ -108,11 +128,7 @@ async function findWork(channels, state, force) {
         work.push(v.id);
       }
       log('info', `${ch.name}: ${notes.length ? notes.join(' · ') : `no VOD ended in the last ${WINDOW_HOURS} h (Twitch deletes the originals within about a day)`}`);
-    } catch (e) {
-      ch.lastCheck = now;
-      ch.error = e.message || String(e);
-      log('warn', `${login}: could not list the channel's VODs on Twitch: ${ch.error} (the menu shows it; tried again next run)`);
-    }
+    });
   }
   // Forget VODs older than Twitch's 60-day limit.
   for (const [id, v] of Object.entries(state.vods)) {
@@ -163,6 +179,17 @@ async function send(tabId, message) {
   return null;
 }
 
+async function isTabStillBusy() {
+  const tabs = await api.tabs.query({ url: TWITCH_TABS }).catch(() => []);
+  for (const tab of tabs) {
+    try {
+      const r = await api.tabs.sendMessage(tab.id, { vu: 'autoPing' }, { frameId: 0 });
+      if (r && r.busy) return true;
+    } catch (e) { /* tab not reachable */ }
+  }
+  return false;
+}
+
 // ------------------------------------------------------------------ check
 async function check(force) {
   const settings = await api.storage.sync.get(DEFAULTS);
@@ -173,18 +200,29 @@ async function check(force) {
 
   const { autoBusyUntil } = await session.get({ autoBusyUntil: 0 });
   if (autoBusyUntil > Date.now()) {
-    if (force) await session.set({ autoQueued: true });
-    log('info', `auto-save: skipped, the previous run is still going (given up at ${new Date(autoBusyUntil).toLocaleTimeString()} if it never reports back)${force ? '; queued a follow-up check right after it finishes' : ''}`);
-    return { ok: false, busy: true, queued: !!force };
+    if (await isTabStillBusy()) {
+      if (force) await session.set({ autoQueued: true });
+      log('info', `auto-save: skipped, the previous run is still going (given up at ${new Date(autoBusyUntil).toLocaleTimeString()} if it never reports back)${force ? '; queued a follow-up check right after it finishes' : ''}`);
+      return { ok: false, busy: true, queued: !!force };
+    }
+    log('info', 'auto-save: clearing stale busy lock (no Twitch tab is running an auto-save)');
+    await session.set({ autoBusyUntil: 0 });
+    await updateState((s) => { for (const v of Object.values(s.vods || {})) v.running = false; });
   }
   await session.set({ autoQueued: false });
   log('info', `auto-save run (${force ? 'asked now' : `every ${EVERY_MINUTES} min`}): looking at ${settings.autoChannels.length} channel(s): ${settings.autoChannels.join(', ')}`);
 
   let work = [];
   const titles = {};
+  const meta = {};
   await updateState(async (state) => {
     work = await findWork(settings.autoChannels, state, force);
-    for (const id of work) if (state.vods[id] && state.vods[id].title) titles[id] = state.vods[id].title;
+    for (const id of work) {
+      const rec = state.vods[id];
+      if (!rec) continue;
+      if (rec.title) titles[id] = rec.title;
+      meta[id] = { title: rec.title || '', channel: rec.channel || '', streamedAt: rec.createdAt ? new Date(rec.createdAt).getTime() : null };
+    }
     state.lastRun = Date.now();
     state.note = '';
   });
@@ -200,7 +238,7 @@ async function check(force) {
     (picked.opened ? `a background tab opened for it (tab ${picked.tab.id}, twitch.tv/robots.txt, closed when done)` : `an open Twitch tab (tab ${picked.tab.id}, ${picked.tab.active ? 'the one you are looking at' : 'not the one you are looking at'})`));
   await updateState((state) => { for (const id of work) if (state.vods[id]) state.vods[id].running = true; });
   await session.set({ autoBusyUntil: Date.now() + BUSY_MINUTES * 6e4 });
-  const reply = await send(picked.tab.id, { vu: 'autosave', vodIds: work, titles });
+  const reply = await send(picked.tab.id, { vu: 'autosave', vodIds: work, titles, meta });
   if (!reply || !reply.accepted) {
     log('warn', `auto-save: tab ${picked.tab.id} ${reply && reply.busy ? 'is still busy with an earlier run' : 'did not answer for 10 s (its page may not have loaded)'}: tried again next run`);
     await session.set({ autoBusyUntil: 0 });

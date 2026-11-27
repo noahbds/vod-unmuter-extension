@@ -1,18 +1,19 @@
 // Hook module, page only (cut out of the player worker's copy): see src/hook.js.
 
-import { IS_PAGE, realFetch, segments } from '../shared/state.js';
+import { IS_PAGE, realFetch } from '../shared/state.js';
 import { log } from '../shared/logger.js';
-import { jobs } from './recovery-state.js';
+import { evictVodState } from './recovery-state.js';
 import { compressJob, maybeSaveAll } from './save-compress-jobs.js';
 import { readMaster, rewritePlaylist } from '../player/playlist-handler.js';
 
-if (IS_PAGE) scope.__vodUnmuterAuto = { save: (vodId, title) => autoSave(vodId, title) };
+if (IS_PAGE) scope.__vodUnmuterAuto = { save: (vodId, meta) => autoSave(vodId, meta) };
 
 // ------------------------------------------------------------ auto-save
 // Saves a VOD's muted parts without playing it (for the channels in the
 // popup's auto-save list). Runs in a twitch.tv page, because that's where
 // saved audio lives and where the viewer is logged in.
-export async function autoSave(vodId, title) {
+async function autoSave(vodId, meta) {
+  const info = typeof meta === 'string' ? { title: meta } : (meta || {});
   const out = { vodId: String(vodId), ok: false };
   let job = null;
   try {
@@ -30,9 +31,13 @@ export async function autoSave(vodId, title) {
     }).then((r) => r.json());
     const tok = gql && gql.data && gql.data.videoPlaybackAccessToken;
     if (!tok) throw new Error('Twitch did not give access to this VOD');
-    const masterUrl = `https://usher.ttvnw.net/vod/${vodId}.m3u8?sig=${tok.signature}` +
-      `&token=${encodeURIComponent(tok.value)}&allow_source=true&allow_audio_only=true&player_backend=mediaplayer`;
-    const mr = await realFetch.call(scope, masterUrl);
+    const qs = `?sig=${tok.signature}&token=${encodeURIComponent(tok.value)}&allow_source=true&allow_audio_only=true&player_backend=mediaplayer`;
+    let masterUrl = `https://usher.ttvnw.net/vod/v2/${vodId}.m3u8${qs}&supported_codecs=av1,h265,h264`;
+    let mr = await realFetch.call(scope, masterUrl);
+    if (!mr.ok && mr.status !== 403) {
+      masterUrl = `https://usher.ttvnw.net/vod/${vodId}.m3u8${qs}`;
+      mr = await realFetch.call(scope, masterUrl);
+    }
     if (!mr.ok) {
       throw new Error(mr.status === 403
         ? 'subscriber-only: log in to Twitch with an account subscribed to this channel'
@@ -49,10 +54,12 @@ export async function autoSave(vodId, title) {
 
     job = rewritePlaylist(text, mediaUrl, true).job;
     job.vodId = String(vodId);
-    if (title) job.title = String(title);
+    if (info.title) job.title = String(info.title);
+    if (info.channel) job.channel = String(info.channel);
+    if (info.streamedAt) job.streamedAt = Number(info.streamedAt);
     out.vodKey = job.vodKey;
     await job.checked;
-    await maybeSaveAll(job, true);
+    await maybeSaveAll(job);
     await compressJob(job);
     out.restorable = job.segs.filter((s) => s.source).length;
     out.saved = job.segs.filter((s) => job.saved.has(s.num)).length;
@@ -66,10 +73,7 @@ export async function autoSave(vodId, title) {
     log('warn', '@auto-save', `VOD ${vodId}:`, out.error);
   } finally {
     // Forget it, so the next run starts fresh and memory is freed.
-    if (job) {
-      jobs.splice(jobs.indexOf(job), 1);
-      for (const s of job.segs) segments.delete(s.urls['.ts']);
-    }
+    if (job) evictVodState(job.vodBase, job);
   }
   return out;
 }

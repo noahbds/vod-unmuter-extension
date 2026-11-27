@@ -4,28 +4,59 @@
 import { cleanVodTitle, clock, currentVodId, h, span, UI_CSS } from './dom.js';
 import { applyUiSettings, settings, ui, UNREACHABLE_AFTER_MS } from './state.js';
 import { explainSource, reasonText, savedCopyLine } from './explanations.js';
-import { placeBadge, renderBadge, setPanelPinned } from './panel.js';
+import { highlightCurrentRange, placeBadge, renderBadge, seekToTime, setPanelPinned } from './panel.js';
 
-export function findPlayer() {
+function findPlayer() {
   const players = document.querySelectorAll('[data-a-target="video-player"]');
   for (const p of players) if (p.querySelector('.seekbar-bar')) return p;
   return players[0] || null;
 }
 
 // Pure helper: finds a confirmed still-muted range ('no', not 'pending' or 'wait')
-// covering `currentTime` that hasn't just been auto-skipped.
+// covering `currentTime` that hasn't just been auto-skipped. If an immediately
+// adjacent range at `r.end` is still 'pending', wait so contiguous deleted
+// stretches skip in one jump instead of two.
 export function findMutedRangeToSkip(ranges, currentTime, lastSkippedStart) {
   if (!Array.isArray(ranges) || !Number.isFinite(currentTime)) return null;
-  for (const r of ranges) {
+  for (let i = 0; i < ranges.length; i++) {
+    const r = ranges[i];
     if (r.restored || r.kind !== 'no') continue;
-    if (currentTime >= r.start && currentTime < r.end - 0.5 && r.start !== lastSkippedStart) return r;
+    if (currentTime >= r.start && currentTime < r.end - 0.5 && r.start !== lastSkippedStart) {
+      const next = ranges[i + 1];
+      if (next && next.kind === 'pending' && Math.abs(next.start - r.end) < 0.5) return null;
+      return r;
+    }
   }
   return null;
 }
 
+function dismissSkipToast() {
+  clearTimeout(ui.toastTimer);
+  ui.toastTimer = 0;
+  if (ui.toast) { ui.toast.remove(); ui.toast = null; }
+}
+
+function showSkipToast(hit, fromTime) {
+  if (typeof document === 'undefined' || !document.querySelectorAll) return;
+  const player = findPlayer();
+  if (!player) return;
+  dismissSkipToast();
+  ui.toast = h('div', { class: 'vu-toast', role: 'status', 'aria-live': 'polite' },
+    h('span', null, `Skipped ${clock(hit.start)} – ${clock(hit.end)} (still muted)`),
+    h('button', {
+      class: 'vu-link', onclick: (e) => {
+        e.stopPropagation();
+        dismissSkipToast();
+        seekToTime(fromTime);
+      },
+    }, 'Undo'));
+  player.append(ui.toast);
+  ui.toastTimer = setTimeout(dismissSkipToast, 5000);
+}
+
 export function maybeSkipMuted(video) {
   if (!settings.skipMuted || !video || video.paused) return false;
-  if (!ui.state || ui.state.type !== 'result' || !Array.isArray(ui.state.ranges)) return false;
+  if (!ui.state || (ui.state.type !== 'result' && ui.state.type !== 'checking') || !Array.isArray(ui.state.ranges)) return false;
   if (Date.now() < ui.manualSeekUntil) return false;
   const t = video.currentTime;
   if (ui.lastSkippedStart >= 0) {
@@ -36,10 +67,12 @@ export function maybeSkipMuted(video) {
   if (!hit) return false;
   ui.lastSkippedStart = hit.start;
   video.currentTime = hit.end;
+  ui.currentTime = hit.end;
+  showSkipToast(hit, t);
   return true;
 }
 
-export function renderBars() {
+function renderBars() {
   const state = ui.state;
   if (ui.barsVersion !== ui.version) {
     ui.barsVersion = ui.version;
@@ -66,14 +99,14 @@ export function renderBars() {
 
 // The colored parts cover Twitch's purple "already watched" fill, so the
 // watched part of each one is drawn lighter (almost white) instead.
-export function playedPercent() {
+function playedPercent() {
   const fill = document.querySelector('.seekbar-bar .seekbar-segment[style*="169, 112, 255"]');
   if (fill) { const w = parseFloat(fill.style.width); if (w >= 0) return w; }
   const v = document.querySelector('video');
   return v && ui.state && ui.state.total ? (v.currentTime / ui.state.total) * 100 : 0;
 }
 
-export function paintPlayed() {
+function paintPlayed() {
   if (!ui.bars) return;
   const p = playedPercent();
   for (const el of ui.bars.children) {
@@ -82,14 +115,30 @@ export function paintPlayed() {
   }
 }
 
-export function updateUi() {
+function observePlayer(player) {
+  if (typeof MutationObserver === 'undefined' || ui.observerTarget === player) return;
+  if (ui.observer) { ui.observer.disconnect(); ui.observer = null; }
+  ui.observerTarget = player;
+  if (!player) return;
+  ui.observer = new MutationObserver(() => {
+    if (ui.rafPending || !ui.state) return;
+    if ((ui.badge && ui.badge.isConnected || !settings.badge) && (ui.bars && ui.bars.isConnected || !settings.recolor)) return;
+    ui.rafPending = true;
+    requestAnimationFrame(() => { ui.rafPending = false; updateUi(); });
+  });
+  ui.observer.observe(player, { childList: true, subtree: true });
+}
+
+function updateUi() {
   const id = currentVodId();
   if (id !== ui.vodId) {
     ui.vodId = id; ui.state = null; ui.version++; ui.vodSince = Date.now();
-    ui.owner = null; ui.lastSkippedStart = -1;
+    ui.owner = null; ui.lastSkippedStart = -1; ui.currentTime = 0;
+    dismissSkipToast();
   }
 
   const player = findPlayer();
+  observePlayer(player);
   const twitchShowsMuted = !ui.state && ui.vodId && player && settings.enabled &&
     (player.querySelector('.seekbar-segment[style*="212, 73, 73"]') ||
      document.querySelector('[data-test-selector^="muted-segments-alert"]'));
@@ -102,6 +151,9 @@ export function updateUi() {
   const show = !!(ui.state && ui.vodId && player);
 
   if (show && settings.badge) {
+    if (player.clientHeight > 0 && ui.badge.style && ui.badge.style.setProperty) {
+      ui.badge.style.setProperty('--vu-max-panel-h', `${Math.max(160, Math.min(340, player.clientHeight - 76))}px`);
+    }
     placeBadge(player);
     renderBadge();
   } else if (ui.badge) ui.badge.remove();
@@ -139,7 +191,7 @@ export function startUiLoop() {
   let tipTimers = [];
   document.addEventListener('pointermove', (e) => {
     const state = ui.state;
-    if (!state || state.type !== 'result' || !settings.recolor || !e.target.closest) { ui.tip.remove(); return; }
+    if (!state || (state.type !== 'result' && state.type !== 'checking') || !settings.recolor || !e.target.closest) { ui.tip.remove(); return; }
     const area = e.target.closest('[data-a-target="player-seekbar"]');
     const bar = area && area.querySelector('.seekbar-bar');
     const player = area && area.closest('[data-a-target="video-player"]');
@@ -231,13 +283,15 @@ export function startUiLoop() {
   });
   channel.postMessage({ type: 'hello' });
 
-  setInterval(updateUi, 700);
+  setInterval(updateUi, 1200);
 
   let lastWatched = null;
   setInterval(() => {
     const v = document.querySelector('video');
     const isVod = v && ui.state && ui.state.total && Number.isFinite(v.duration) && Math.abs(v.duration - ui.state.total) < 120;
     if (v && ui.vodId && isVod) {
+      ui.currentTime = v.currentTime;
+      highlightCurrentRange();
       channel.postMessage({
         type: 'position', tab: window.__vodUnmuterTab, t: v.currentTime,
         vodId: ui.vodId, title: cleanVodTitle(document.title),
@@ -254,8 +308,12 @@ export function startUiLoop() {
 
   for (const type of ['timeupdate', 'seeked']) {
     document.addEventListener(type, (e) => {
+      if (e.target && e.target.tagName === 'VIDEO') {
+        ui.currentTime = e.target.currentTime;
+        highlightCurrentRange();
+        if (type === 'timeupdate') maybeSkipMuted(e.target);
+      }
       if (ui.bars && ui.bars.isConnected && ui.state && ui.state.ranges) paintPlayed();
-      if (type === 'timeupdate' && e.target && e.target.tagName === 'VIDEO') maybeSkipMuted(e.target);
     }, true);
   }
 }

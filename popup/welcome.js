@@ -17,10 +17,6 @@ bindChannelForm({
 });
 
 (async () => {
-  try {
-    const ok = typeof AudioEncoder === 'function' && (await AudioEncoder.isConfigSupported({
-      codec: 'mp4a.40.2', sampleRate: 48000, numberOfChannels: 2, bitrate: 96000, aac: { format: 'adts' } })).supported;
-    $('firefoxNote').hidden = !!ok;
-  } catch (e) { $('firefoxNote').hidden = false; }
+  $('firefoxNote').hidden = await checkAacSupport();
 })();
 showChannels();

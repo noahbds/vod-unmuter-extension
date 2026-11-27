@@ -5,13 +5,24 @@ export const CHANNEL = 'vod-unmuter';
 
 export const PLAYING_MS = 10 * 60 * 1000; // "playing" = downloaded a segment of it in the last 10 min
 
+export const parseVodKey = (vod) => {
+  const parts = String(vod || '').split('_');
+  const time = Number(parts[parts.length - 1]);
+  return {
+    channel: parts.length >= 4 ? parts.slice(1, -2).join('_') : '',
+    streamedAt: time > 1e9 ? time * 1000 : null,
+  };
+};
+
 // For log lines. A job: "<channel> <stream day> · <quality>", e.g.
 // "squeezie 2026-11-22 · Source". A muted part: its number and where it is in
 // the VOD, e.g. "part 242 (40:20–40:30)".
 export const jobName = (job) => {
-  const t = Number(job.vodKey.split('_').pop());
-  const day = t > 1e9 ? ' ' + new Date(t * 1000).toISOString().slice(0, 10) : '';
-  return `${job.vodKey.split('_').slice(1, -2).join('_') || job.vodKey.slice(0, 8)}${day} · ${prettyQuality(job.dir)}`;
+  const info = parseVodKey(job.vodKey);
+  const chan = job.channel || info.channel || String(job.vodKey || '').slice(0, 8);
+  const streamedAt = job.streamedAt || info.streamedAt;
+  const day = streamedAt ? ' ' + new Date(streamedAt).toISOString().slice(0, 10) : '';
+  return `${chan}${day} · ${prettyQuality(job.dir)}`;
 };
 export const fmtTime = (sec) => {
   const s = Math.max(0, Math.round(sec || 0));
@@ -32,7 +43,7 @@ export const stretches = (segs, max = 6) => {
 };
 // The same for a part known only by its number.
 export const partOf = (job, num) => {
-  const seg = job.segs.find((s) => s.num === num);
+  const seg = (job.byNum && job.byNum.get(num)) || job.segs.find((s) => s.num === num);
   return seg ? partName(seg) : `part ${num}`;
 };
 // A file a muted part's sound can come from, e.g. 'Source original file',

@@ -5,7 +5,7 @@ import { agoText, h, plural } from './dom.js';
 import { settings, ui } from './state.js';
 
 export const REPO = 'https://github.com/noahbds/vod-unmuter-extension';
-export const WHY_URL = REPO + '#how-long-twitch-keeps-the-original-audio';
+const WHY_URL = REPO + '#how-long-twitch-keeps-the-original-audio';
 
 // Short label of why a part is still muted (panel list).
 export const REASON_SHORT = {
@@ -19,7 +19,7 @@ export const QUALITY_LABEL = {
   small: 'Saved in small size (64 kbps)',
 };
 
-export const endedAgo = (st) => (st && st.endedAt ? agoText(Date.now() - st.endedAt) : null);
+const endedAgo = (st) => (st && st.endedAt ? agoText(Date.now() - st.endedAt) : null);
 
 // Full explanation (seek bar tooltip).
 export function reasonText(reason, st) {
@@ -84,7 +84,7 @@ export function verdictBox(st) {
     }, `Auto-save ${l.suggest}'s next VODs`)) : null)));
 }
 
-export const savedDate = (st) => {
+const savedDate = (st) => {
   const s = st || ui.state;
   const t = s && s.save && s.save.savedAt;
   return t ? ' on ' + new Date(t).toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) : '';
@@ -142,7 +142,7 @@ export function checkingText(st, sample) {
 // "Saved copy: …" line of the seek bar tooltip: is this part kept on this
 // computer, for when Twitch deletes the original?
 export function savedCopyText(r, st) {
-  if (!r || typeof r.saved !== 'number') return null;
+  if (!r || r.kind === 'pending' || typeof r.saved !== 'number') return null;
   const s = st || ui.state || {};
   const sv = s.save || {};
   const n = r.segments;

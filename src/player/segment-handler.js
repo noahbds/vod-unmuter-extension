@@ -4,17 +4,18 @@ import { fileLabel, isMiss, jobName, notAhead, partName, prettyQuality, requestF
 import { known, realFetch, saveMode, savingOn, segments } from '../shared/state.js';
 import { describeArg, log } from '../shared/logger.js';
 import { extractAudio, spliceAudio } from '../media/transport-stream.js';
-import { adtsToMp4Audio, extractMp4Audio, spliceMp4Audio } from '../media/fragmented-mp4.js';
+import { adtsInfo, muxAdts, packetsToAdts, splitAdts } from '../media/adts-muxer.js';
+import { adtsToMp4Audio, extractMp4Audio, mp4AudioToAdts, spliceMp4Audio } from '../media/fragmented-mp4.js';
 import { markMissing } from '../storage/gone-cache.js';
 import { loadRecord, loadSaved, recordToFrames } from '../storage/saved-audio.js';
-import { donorSources, loadInit, probe, urlFor } from '../recovery/probe-resolver.js';
+import { donorSources, donorUrlFor, loadInit, probe } from '../recovery/probe-resolver.js';
 import { jobOf, jobs, noteActivity, scheduleResult } from '../recovery/recovery-state.js';
 import { retryUnknown } from '../recovery/scan-scheduler.js';
 import { saveFromBytes } from '../recovery/save-compress-jobs.js';
 import { handleOther } from './playlist-handler.js';
 
 // ------------------------------------------------------------ segments
-export const segmentResponse = (body, type = 'video/mp2t') =>
+const segmentResponse = (body, type = 'video/mp2t') =>
   new Response(body, { status: 200, headers: { 'Content-Type': type } });
 
 // In "Whole VOD" mode, or in "Parts ahead of me" once the player's position is
@@ -25,7 +26,7 @@ export const canSaveFetched = (seg) =>
 
 // Downloads the muted segment and puts `audio` into it (MP4 VOD: `ownInit`
 // is the init file of the quality being watched).
-export async function spliced(seg, input, init, audio, ownInit) {
+async function spliced(seg, input, init, audio, ownInit) {
   const muted = await realFetch.call(scope, requestFor(seg.urls.muted, input), init);
   if (!muted.ok) return { res: muted, ok: false };
   const mb = new Uint8Array(await muted.arrayBuffer());
@@ -37,7 +38,7 @@ export async function spliced(seg, input, init, audio, ownInit) {
   return { res: segmentResponse(out || mb), ok: !!out };
 }
 
-export async function fetchSegment(seg, input, init) {
+async function fetchSegment(seg, input, init) {
   const job = seg.job;
   const aborted = () => init && init.signal && init.signal.aborted;
   let uncertain = false; // a file couldn't be checked (network problem)
@@ -59,7 +60,7 @@ export async function fetchSegment(seg, input, init) {
         known.set(url, true);
         confirm(seg, sfx);
         const save = canSaveFetched(seg);
-        if (save) r.clone().arrayBuffer().then((b) => saveFromBytes(seg, new Uint8Array(b), job.dir)).catch(() => {});
+        if (save) r.clone().arrayBuffer().then((b) => saveFromBytes(seg, new Uint8Array(b), job.dir, !!job.mp4)).catch(() => {});
         played(`the ${fileLabel(job, sfx)} (${r.status}), as it is` + (save ? '; its sound is being saved' : ''));
         return r;
       }
@@ -97,29 +98,51 @@ export async function fetchSegment(seg, input, init) {
     }
   }
 
-  // c. Another quality still has the original: borrow its audio.
+  // c. Another quality still has the original: borrow its audio (even across .mp4 <-> .ts).
   const donors = donorSources(seg);
-  if (seg.source && seg.source.includes('/')) donors.unshift(seg.source);
-  const found = await Promise.all(donors.map((s) => probe(urlFor(seg, s), true)));
-  const donor = donors[found.indexOf(true)];
+  if (seg.source && seg.source.includes('/')) {
+    const prevIdx = donors.indexOf(seg.source);
+    if (prevIdx > 0) donors.splice(prevIdx, 1);
+    if (prevIdx !== 0) donors.unshift(seg.source);
+  }
+  const donorUrls = await Promise.all(donors.map((s) => donorUrlFor(seg, s)));
+  const found = await Promise.all(donorUrls.map((u) => probe(u, true)));
+  const hitIdx = found.indexOf(true);
+  const donor = hitIdx >= 0 ? donors[hitIdx] : null;
   if (found.includes(null)) uncertain = true;
   if (donors.length) steps.push(`other qualities asked at once: ${donors.map((s, i) => `${prettyQuality(s.split('/')[0])} ${found[i] ? 'found' : found[i] === false ? 'deleted' : 'no answer'}`).join(', ')}`);
   if (donor) {
     try {
-      const other = await realFetch.call(scope, requestFor(urlFor(seg, donor), input), init);
+      const donorUrl = donorUrls[hitIdx];
+      const donorDir = donor.split('/')[0];
+      const donorMp4 = /\.mp4(\?|$)/.test(donorUrl);
+      const other = await realFetch.call(scope, requestFor(donorUrl, input), init);
       if (other.ok) {
         const ob = new Uint8Array(await other.arrayBuffer());
-        let audio, ownInit = null;
-        if (job.mp4) {
-          const inits = await Promise.all([loadInit(job, job.dir), loadInit(job, donor.split('/')[0])]);
+        let audio = null, ownInit = null;
+        if (job.mp4 && donorMp4) {
+          const inits = await Promise.all([loadInit(job, job.dir), loadInit(job, donorDir)]);
           ownInit = inits[0];
           audio = inits[1] && extractMp4Audio(ob, inits[1]);
-        } else audio = extractAudio(ob);
+        } else if (job.mp4) {
+          ownInit = await loadInit(job, job.dir);
+          const tsAudio = extractAudio(ob);
+          const frames = tsAudio && tsAudio.type === 0x0f ? splitAdts(packetsToAdts(tsAudio.packets)) : [];
+          audio = ownInit && frames.length ? adtsToMp4Audio(frames, tsAudio.pts, ownInit) : null;
+        } else if (donorMp4) {
+          const dInit = await loadInit(job, donorDir);
+          const mp4Audio = dInit && extractMp4Audio(ob, dInit);
+          const frames = mp4Audio && mp4AudioToAdts(mp4Audio);
+          const pts = mp4Audio ? Math.round((mp4Audio.start * 90000) / mp4Audio.timescale) : 0;
+          audio = frames && frames.length ? { type: 0x0f, pts, packets: muxAdts(frames, pts, adtsInfo(frames[0]).sampleRate) } : null;
+        } else {
+          audio = extractAudio(ob);
+        }
         const { res, ok } = await spliced(seg, input, init, audio, ownInit);
         if (ok) {
           confirm(seg, donor);
           const save = canSaveFetched(seg);
-          if (save) saveFromBytes(seg, ob, donor.split('/')[0]);
+          if (save) saveFromBytes(seg, ob, donorDir, donorMp4);
           played(`the sound of the ${fileLabel(job, donor)} (${(ob.byteLength / 1e6).toFixed(1)} MB downloaded), spliced into the muted ${prettyQuality(job.dir)} file` + (save ? '; its sound is being saved' : ''));
           return res;
         }
@@ -150,7 +173,7 @@ export async function fetchSegment(seg, input, init) {
   return realFetch.call(scope, requestFor(seg.urls.muted, input), init);
 }
 
-export function confirm(seg, source) {
+function confirm(seg, source) {
   const changed = seg.source !== source;
   seg.source = source;
   seg.confirmed = true;

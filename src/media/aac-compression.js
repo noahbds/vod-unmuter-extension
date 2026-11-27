@@ -1,9 +1,9 @@
 // Hook module (page and player worker): see src/hook.js.
 
 import { log } from '../shared/logger.js';
-import { concat } from './adts-muxer.js';
+import { concat, wrapAdts } from './adts-muxer.js';
 
-export async function pipeBytes(bytes, stream) {
+async function pipeBytes(bytes, stream) {
   return new Uint8Array(await new Response(new Blob([bytes]).stream().pipeThrough(stream)).arrayBuffer());
 }
 export async function deflate(bytes) {
@@ -18,16 +18,27 @@ export const inflate = (bytes) => pipeBytes(bytes, new DecompressionStream('defl
 // encoders add ~44 ms of silence at the start of every encode, which
 // would otherwise leave a gap every 10 seconds.
 export const KBPS = { high: 96, small: 64 };
-export const delays = new Map(); // "rate|channels|kbps" -> encoder delay in samples, or null
-export const codecsAvailable = () => typeof scope.AudioEncoder === 'function' && typeof scope.AudioDecoder === 'function';
+const delays = new Map(); // "rate|channels|kbps" -> encoder delay in samples, or null
+const codecsAvailable = () => typeof scope.AudioEncoder === 'function' && typeof scope.AudioDecoder === 'function';
+
+// Picks 'adts' AAC output when supported, else raw 'aac' output (wrapped with
+// 7-byte ADTS headers in encodePcm). Returns { cfg, raw } or null.
+export async function pickAacConfig(sampleRate, channels, kbps) {
+  if (!codecsAvailable()) return null;
+  const base = { codec: 'mp4a.40.2', sampleRate, numberOfChannels: channels, bitrate: kbps * 1000 };
+  for (const [cfg, raw] of [[Object.assign({}, base, { aac: { format: 'adts' } }), false], [base, true]]) {
+    try {
+      if ((await scope.AudioEncoder.isConfigSupported(cfg)).supported) return { cfg, raw };
+    } catch (e) { /* try next */ }
+  }
+  return null;
+}
+
 // Can this browser make AAC at all? (Firefox can't.) Told to the UI, so it
 // doesn't promise compressed saves that won't happen.
 export let aacSupported = null;
 (async () => {
-  try {
-    aacSupported = codecsAvailable() && !!(await scope.AudioEncoder.isConfigSupported({
-      codec: 'mp4a.40.2', sampleRate: 48000, numberOfChannels: 2, bitrate: 96000, aac: { format: 'adts' } })).supported;
-  } catch (e) { aacSupported = false; }
+  try { aacSupported = !!(await pickAacConfig(48000, 2, 96)); } catch (e) { aacSupported = false; }
 })();
 
 export async function decodeFrames(frames, info) {
@@ -59,14 +70,22 @@ export async function decodeFrames(frames, info) {
   });
 }
 
-export async function encodePcm(chans, info, kbps) {
+async function encodePcm(chans, info, kbps) {
+  const picked = await pickAacConfig(info.sampleRate, info.channels, kbps);
+  if (!picked) throw new Error('AAC encoder unsupported');
   const frames = [];
   let failed = null;
   const enc = new scope.AudioEncoder({
-    output: (c) => { const b = new Uint8Array(c.byteLength); c.copyTo(b); frames.push(b); },
+    output: (c) => {
+      const b = new Uint8Array(c.byteLength);
+      c.copyTo(b);
+      const hasAdts = b.length >= 7 && b[0] === 0xff && (b[1] & 0xf6) === 0xf0;
+      const frame = picked.raw && !hasAdts ? wrapAdts(b, info.sampleRate, info.channels) : b;
+      if (frame) frames.push(frame);
+    },
     error: (e) => { failed = e; },
   });
-  enc.configure({ codec: 'mp4a.40.2', sampleRate: info.sampleRate, numberOfChannels: info.channels, bitrate: kbps * 1000, aac: { format: 'adts' } });
+  enc.configure(picked.cfg);
   const n = chans[0].length;
   const planar = new Float32Array(n * info.channels);
   chans.forEach((c, i) => planar.set(c, i * n));
@@ -84,10 +103,9 @@ export async function encoderDelay(info, kbps) {
   if (delays.has(key)) return delays.get(key);
   let delay = null;
   try {
-    const cfg = { codec: 'mp4a.40.2', sampleRate: info.sampleRate, numberOfChannels: info.channels, bitrate: kbps * 1000, aac: { format: 'adts' } };
+    const picked = await pickAacConfig(info.sampleRate, info.channels, kbps);
     const dcfg = { codec: 'mp4a.40.2', sampleRate: info.sampleRate, numberOfChannels: info.channels };
-    if (codecsAvailable() && (await scope.AudioEncoder.isConfigSupported(cfg)).supported &&
-        (await scope.AudioDecoder.isConfigSupported(dcfg)).supported) {
+    if (picked && (await scope.AudioDecoder.isConfigSupported(dcfg)).supported) {
       let seed = 12345;
       const noise = new Float32Array(info.sampleRate);
       // Low-passed noise: never repeats (no false matches) and AAC encodes
