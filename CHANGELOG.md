@@ -1,7 +1,7 @@
 # Changelog
 
-## 1.5.0 (in progress: not released yet)
-
+## 1.5.0
+### 1.5.0 adds clickable muted segments, automatic skipping of unrecoverable muted audio, improved UI and accessibility, fixes VOD detection, and restores original audio in fragmented MP4 streams (HEVC/AV1), with enhanced diagnostics.
 In the player:
 - **Click any muted part in the panel to jump to it.** Each line under *Muted
   parts of this VOD* (`40:20 – 40:30`) now seeks the video to that moment
