@@ -84,9 +84,9 @@ Behind the scenes:
   new unit tests covering `src/ui/*`, `fmt: 'adts'` lossless saves,
   ahead-mode opportunistic saving, backup quota handling, and VOD metadata.
 
-## 1.4.0 (in progress: not released yet)
+## 1.4.0
 
-Clearer logs, two fixes, and the code reorganized underneath (nothing else
+### Clearer logs, two fixes, and the code reorganized underneath (nothing else
 changes in what the extension does).
 
 **Clearer logs** (console, F12). Every line has a purple `[VOD Unmuter]`
@@ -161,7 +161,7 @@ Behind the scenes:
   GitHub Actions check that builds and lints every push and pull request,
   `.editorconfig`, `.nvmrc`, LF line endings, and a wider `.gitignore`.
 
-## 1.3.0 (in progress: not released yet)
+## 1.3.0
 
 **"Parts ahead of me"** replaces "Parts I play" in *What to save*. Only the
 muted parts ahead of where you are are kept: once you've played 20 s at a
