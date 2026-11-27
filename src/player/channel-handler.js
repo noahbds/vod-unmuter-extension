@@ -1,13 +1,13 @@
 // Hook module (page and player worker): see src/hook.js.
 
 import { AHEAD_MIN_PLAY, jobName } from '../shared/constants.js';
-import { channel, IS_PAGE, ORIGIN, post, RESTRICTED, saveMode, settings, TAB, updateSettings, WHERE } from '../shared/state.js';
+import { channel, IS_PAGE, mp4Dirs, ORIGIN, post, renditions, RESTRICTED, saveMode, settings, TAB, updateSettings, vodIdsByBase, WHERE } from '../shared/state.js';
 import { log, logLines } from '../shared/logger.js';
 import { aacSupported } from '../media/aac-compression.js';
 import { openDb } from '../storage/idb.js';
 import { deleteSavedVod, expireSaved, invalidateSavedTotal, loadSavedNums, storageFull, updateVodInfo } from '../storage/saved-audio.js';
 import { setResult } from '../recovery/probe-resolver.js';
-import { currentJob, isCurrent, jobs, reasonOf, scheduleResult, sendResult } from '../recovery/recovery-state.js';
+import { currentJob, isCurrent, jobs, reasonOf, scheduleResult, sendResult, sendState } from '../recovery/recovery-state.js';
 import { noteVodTotals } from '../recovery/scan-scheduler.js';
 import { compressJob, dropBehind, maybeSaveAll } from '../recovery/save-compress-jobs.js';
 
@@ -16,6 +16,23 @@ if (channel) {
   channel.addEventListener('message', async (ev) => {
     const m = ev.data;
     if (!m) return;
+    if (m.type === 'hello' && !m.where && (!m.tab || m.tab === TAB)) {
+      const active = jobs.filter((j) => isCurrent(j)).pop();
+      if (active && (!m.vodId || !active.vodId || String(active.vodId) === String(m.vodId))) sendState(active);
+      return;
+    }
+    if (m.type === 'master' && m.tab === TAB && m.vodBase) {
+      if (Array.isArray(m.dirs) && !renditions.has(m.vodBase)) renditions.set(m.vodBase, m.dirs);
+      if (m.vodId && !vodIdsByBase.has(m.vodBase)) {
+        vodIdsByBase.set(m.vodBase, m.vodId);
+        for (const j of jobs) if (j.vodBase === m.vodBase && !j.vodId) j.vodId = m.vodId;
+      }
+      if (Array.isArray(m.mp4) && m.mp4.length) {
+        if (!mp4Dirs.has(m.vodBase)) mp4Dirs.set(m.vodBase, new Set());
+        for (const d of m.mp4) mp4Dirs.get(m.vodBase).add(d);
+      }
+      return;
+    }
     if (m.type === 'settings' && m.settings) {
       const before = updateSettings(m.settings);
       const changed = Object.keys(settings).filter((k) => k in before && JSON.stringify(settings[k]) !== JSON.stringify(before[k]));

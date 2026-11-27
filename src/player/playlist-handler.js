@@ -8,6 +8,7 @@ import { checkAll, checkMore } from '../recovery/scan-scheduler.js';
 
 // ------------------------------------------------------------ playlists
 export function readMaster(text, masterUrl) {
+  if (/\/v\d+\/playlist\//.test(String(masterUrl || ''))) return; // stitched ad playlist, not a VOD
   const byVod = new Map();
   const mp4ByVod = new Map();
   // "/vod/123.m3u8", or "/vod/v2/123.m3u8" (Twitch's player since late 2026).
@@ -42,6 +43,9 @@ export function readMaster(text, masterUrl) {
   for (const [vodBase, set] of mp4ByVod) {
     if (!mp4Dirs.has(vodBase)) mp4Dirs.set(vodBase, new Set());
     for (const d of set) mp4Dirs.get(vodBase).add(d);
+  }
+  for (const [vodBase, dirs] of byVod) {
+    post({ type: 'master', vodBase, dirs, vodId: idMatch ? idMatch[1] : null, mp4: mp4ByVod.has(vodBase) ? [...mp4ByVod.get(vodBase)] : [] });
   }
   log('debug', `master playlist${idMatch ? ' of VOD ' + idMatch[1] : ''}: ${[...byVod.values()].flat().join(', ') || 'no qualities'}`);
 }
@@ -221,6 +225,7 @@ export async function handleOther(input, init, url) {
     Object.defineProperty(out, 'url', { value: res.url });
     return out;
   } catch (e) {
+    if ((init && init.signal && init.signal.aborted) || (e && e.name === 'AbortError')) return res;
     log('error', `could not rewrite the playlist ${url}: this VOD plays muted as usual`, e);
     return res;
   }

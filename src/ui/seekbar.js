@@ -129,13 +129,18 @@ function observePlayer(player) {
   ui.observer.observe(player, { childList: true, subtree: true });
 }
 
-function updateUi() {
+function syncVodId() {
   const id = currentVodId();
-  if (id !== ui.vodId) {
-    ui.vodId = id; ui.state = null; ui.version++; ui.vodSince = Date.now();
-    ui.owner = null; ui.lastSkippedStart = -1; ui.currentTime = 0;
-    dismissSkipToast();
-  }
+  if (id === ui.vodId) return false;
+  ui.vodId = id; ui.state = null; ui.version++; ui.vodSince = Date.now();
+  ui.owner = null; ui.lastSkippedStart = -1; ui.currentTime = 0; ui.mutedSeenSince = 0;
+  dismissSkipToast();
+  if (id && ui.channel) ui.channel.postMessage({ type: 'hello', tab: typeof window !== 'undefined' ? window.__vodUnmuterTab : '', vodId: id });
+  return true;
+}
+
+function updateUi() {
+  syncVodId();
 
   const player = findPlayer();
   observePlayer(player);
@@ -261,6 +266,8 @@ export function startUiLoop() {
     if (!m) return;
     if (m.tab && window.__vodUnmuterTab && m.tab !== window.__vodUnmuterTab) return;
     if (m.type === 'hello' && m.where === 'player') { ui.playerHellos++; return; }
+    syncVodId();
+    if (m.vodId && ui.vodId && String(m.vodId) !== String(ui.vodId)) return;
     if (m.instance && ['checking', 'result', 'none'].includes(m.type)) {
       if (m.playing) ui.owner = m.instance;
       else if (ui.owner && m.instance !== ui.owner) return;
@@ -281,7 +288,7 @@ export function startUiLoop() {
     } else return;
     updateUi();
   });
-  channel.postMessage({ type: 'hello' });
+  channel.postMessage({ type: 'hello', tab: window.__vodUnmuterTab, vodId: ui.vodId });
 
   setInterval(updateUi, 1200);
 

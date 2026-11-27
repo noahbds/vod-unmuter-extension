@@ -6,7 +6,7 @@ import { log } from '../shared/logger.js';
 import { extractAudio } from '../media/transport-stream.js';
 import { adtsInfo, concat, packetsToAdts, splitAdts } from '../media/adts-muxer.js';
 import { extractMp4Audio, mp4AudioToAdts } from '../media/fragmented-mp4.js';
-import { decodeFrames, deflate, encoderDelay, KBPS, reencode } from '../media/aac-compression.js';
+import { aacSupported, decodeFrames, deflate, encoderDelay, KBPS, reencode } from '../media/aac-compression.js';
 import { recBytes } from '../storage/idb.js';
 import { markMissing } from '../storage/gone-cache.js';
 import { deleteSavedSegments, listSaved, loadRecord, loadSaved, loadSavedNums, makeRoom, putRecord, recordToAudio } from '../storage/saved-audio.js';
@@ -184,7 +184,7 @@ export async function maybeSaveAll(job) {
     (passed ? ` · ${passed} skipped: you played past them meanwhile` : '') +
     (job.limitReached ? ` · stopped: ${job.storageFull ? 'no room left in the browser (see the warning)' : `the storage limit (${settings.maxStorageMB} MB) is reached`}` : '') +
     (failed.length && !job.limitReached ? ` · not saved (no quality could be downloaded): ${stretches(failed)}` : '') +
-    (job.saved.size ? ' · compressing comes next' : ''));
+    (job.saved.size && KBPS[settings.saveQuality] && aacSupported !== false ? ' · compressing comes next' : ''));
   job.saving = false;
   job.savedAll = !job.limitReached;
   sendResult(job);

@@ -52,13 +52,17 @@ Saved audio, backups and auto-save:
   locks if an earlier tab closed or hung.
 
 Behind the scenes:
-- **Bounded memory & hot-path optimizations.** Idle VOD maps (`playlists`,
-  `known`, `mp4Inits`, `renditions`, `segments`) are evicted on SPA navigation
-  and after auto-save runs; segment lookups use `O(1)` `job.byNum`; watched-part
-  deletions batch into a single IndexedDB transaction; MP4 `moof` fragments
-  write in one pass; MPEG-TS header parsing enforces strict 188-byte packet
-  bounds; and worker injection decodes binary `Uint8Array` `Blob`s without sync
-  XHR and supports `{ type: 'module' }` workers.
+- **Bounded memory, SPA VOD-switch fixes & hot-path optimizations.** Idle VOD
+  maps (`playlists`, `known`, `mp4Inits`, `renditions`, `segments`) are evicted
+  on SPA navigation and after auto-save runs; instant `0.0 s` cached checks on
+  SPA VOD switches are no longer cleared by the next UI tick (fixing false
+  `"Not active"` / `"unreachable"` warnings); master-playlist qualities are
+  shared across multiple player workers; cancelled pre-roll ad playlists
+  (`AbortError`) no longer log playlist errors; segment lookups use `O(1)`
+  `job.byNum`; watched-part deletions batch into a single IndexedDB transaction;
+  MP4 `moof` fragments write in one pass; MPEG-TS header parsing enforces strict
+  188-byte packet bounds; and worker injection decodes binary `Uint8Array`
+  `Blob`s without sync XHR and supports `{ type: 'module' }` workers.
 - **Zero-dead-code build gate & new unit tests.** `node build.mjs` now fails on
   unused imports, unreferenced top-level declarations, or unneeded module
   exports across `src/` and `popup/`, alongside new unit tests covering mixed

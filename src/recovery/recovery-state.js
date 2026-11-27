@@ -182,7 +182,7 @@ export function sendResult(job, checking) {
   }
   if (isCurrent(job)) {
     post({
-      type: checking ? 'checking' : 'result', key: job.key, vod: job.vod, vodKey: job.vodKey,
+      type: checking ? 'checking' : 'result', key: job.key, vod: job.vod, vodKey: job.vodKey, vodId: job.vodId || null,
       instance: INSTANCE, playing: !!job.lastSegmentAt && Date.now() - job.lastSegmentAt < PLAYING_MS,
       done: job.done, found: job.found, sample: job.sample || null, allGoneAfterH: ALL_GONE_AFTER_H,
       quality: prettyQuality(job.dir), total: job.total,

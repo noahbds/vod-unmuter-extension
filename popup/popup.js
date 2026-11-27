@@ -131,29 +131,32 @@ let lastReply = null;
 let deletedVodIds = new Set();
 
 async function checkDeletedVods(vods) {
-  const ids = [...new Set((vods || []).map((v) => v.vodId).filter(Boolean))];
+  const ids = [...new Set((vods || []).map((v) => v.vodId).filter(Boolean).map(String))];
   if (!ids.length) return;
   try {
-    const { deletedVodCache } = await sessionStore.get({ deletedVodCache: null });
-    if (deletedVodCache && Date.now() - deletedVodCache.at < 15 * 60 * 1000 &&
-        ids.every((id) => deletedVodCache.checked.includes(id))) {
-      deletedVodIds = new Set(deletedVodCache.missing);
+    const { deletedVodCacheV2 } = await sessionStore.get({ deletedVodCacheV2: null });
+    if (deletedVodCacheV2 && Date.now() - deletedVodCacheV2.at < 15 * 60 * 1000 &&
+        ids.every((id) => deletedVodCacheV2.checked.includes(id))) {
+      deletedVodIds = new Set(deletedVodCacheV2.missing);
       return;
     }
     const missing = [];
-    for (let i = 0; i < ids.length; i += 30) {
-      const chunk = ids.slice(i, i + 30);
+    for (let i = 0; i < ids.length; i += 25) {
+      const chunk = ids.slice(i, i + 25);
+      const query = 'query {\n' + chunk.map((id, j) => `v${j}: video(id: ${JSON.stringify(id)}) { id }`).join('\n') + '\n}';
       const r = await fetch('https://gql.twitch.tv/gql', {
         method: 'POST', headers: { 'Client-ID': TWITCH_CLIENT_ID },
-        body: JSON.stringify({ query: `query($ids: [ID!]!) { videos(ids: $ids) { id } }`, variables: { ids: chunk } }),
+        body: JSON.stringify({ query }),
       });
       if (!r.ok) return;
       const body = await r.json();
-      const alive = new Set(((body && body.data && body.data.videos) || []).filter(Boolean).map((v) => String(v.id)));
-      for (const id of chunk) if (!alive.has(String(id))) missing.push(String(id));
+      if (!body || body.errors || !body.data || typeof body.data !== 'object') return;
+      chunk.forEach((id, j) => {
+        if (('v' + j) in body.data && body.data['v' + j] === null) missing.push(id);
+      });
     }
     deletedVodIds = new Set(missing);
-    await sessionStore.set({ deletedVodCache: { at: Date.now(), checked: ids, missing } });
+    await sessionStore.set({ deletedVodCache: null, deletedVodCacheV2: { at: Date.now(), checked: ids, missing } });
   } catch (e) { /* offline: skip */ }
 }
 
@@ -210,7 +213,7 @@ function render(reply) {
   const pinnedPct = limit ? Math.min(100, Math.round((pinnedBytes / limit) * 100)) : 0;
   const freePct = Math.max(0, pct - pinnedPct);
   const quotaBytes = Number(reply.quota) || 0;
-  storage.append(
+  const storageNodes = [
     el('div', { class: 'line' },
       el('span', null, el('b', null, mb(total)), ` · ${allVods.length} VOD${allVods.length === 1 ? '' : 's'}`,
         pinnedBytes > 0 ? ` (${mb(pinnedBytes)} pinned)` : ''),
@@ -219,7 +222,9 @@ function render(reply) {
       pinnedPct ? el('div', { class: 'pinned-fill', style: `width:${pinnedPct}%`, title: `Pinned: ${mb(pinnedBytes)}` }) : null,
       freePct ? el('div', { class: 'evictable-fill', style: `width:${freePct}%` }) : null) : null,
     quotaBytes > 0 && (limit === 0 || quotaBytes < limit) && quotaBytes - total < 200e6
-      ? el('small', { class: 'note' }, `Browser storage quota here is ${mb(quotaBytes)}.`) : null);
+      ? el('small', { class: 'note' }, `Browser storage quota here is ${mb(quotaBytes)}.`) : null,
+  ].filter(Boolean);
+  storage.append(...storageNodes);
   if (readOnly) {
     box.append(el('p', { class: 'cached' },
       `As of ${new Date(reply.at).toLocaleString()}. Open a www.twitch.tv tab to delete, pin or export. `,
@@ -271,10 +276,15 @@ function render(reply) {
     const body = el('div', { class: 'body' });
     for (const v of list) {
       const { main, why, title, url } = vodLines(v);
+      const titleNode = title
+        ? (url
+          ? el('a', { class: 'vod-title', href: url, target: '_blank', rel: 'noopener', title: `Open "${title}" on Twitch` }, title)
+          : el('div', { class: 'vod-title', title }, title))
+        : null;
       const link = url ? el('a', { class: 'vod-link', href: url, target: '_blank', rel: 'noopener', title: title ? `Open "${title}" on Twitch` : 'Open this VOD on Twitch' }, ' ↗') : null;
       body.append(el('div', { class: 'item' + (v.pinned ? ' pinned' : '') },
         el('div', { class: 'grow' },
-          title ? el('div', { class: 'vod-title', title }, title) : null,
+          titleNode,
           el('div', null, main, v.pinned ? ' · 📌' : '', link),
           why ? el('small', null, why) : null),
         readOnly ? null : el('span', { class: 'buttons' },
